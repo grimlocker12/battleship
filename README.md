@@ -14,7 +14,12 @@ on the same home WiFi/network.
 **Option A — Permanent install on TrueNAS CORE (recommended if you have it):**
 Runs as a real always-on service in a jail — starts automatically when your
 NAS boots, and restarts itself automatically if it ever crashes. Nobody
-ever has to start a server. See **[deploy/TRUENAS-SETUP.md](deploy/TRUENAS-SETUP.md)**.
+ever has to start a server.
+- On Windows with **WinSCP** and not much terminal experience? Use
+  **[deploy/INSTALL-WITH-WINSCP.md](deploy/INSTALL-WITH-WINSCP.md)** — drag
+  and drop the file transfer, copy-paste two commands, done.
+- Comfortable with a host shell / SSH already? See
+  **[deploy/TRUENAS-SETUP.md](deploy/TRUENAS-SETUP.md)** instead.
 
 **Option B — Manual run on any Windows/Mac PC:** Good for trying it out, or
 if you don't have a NAS. One PC has to run the server each time you want to
