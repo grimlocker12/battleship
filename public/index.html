@@ -318,11 +318,94 @@
     0% { transform: translateY(0) rotate(0deg); }
     100% { transform: translateY(105vh) rotate(540deg); }
   }
+
+  /* ---- Fun overlay: particle bursts + floating text, positioned in viewport coords ---- */
+  #effectsLayer {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    overflow: visible;
+    z-index: 45;
+  }
+  .particle {
+    position: fixed;
+    pointer-events: none;
+    font-size: 18px;
+    z-index: 45;
+    animation: particleFly 0.7s ease-out forwards;
+    transform: translate(-50%, -50%);
+  }
+  @keyframes particleFly {
+    0% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+    100% { transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))) scale(0.4); opacity: 0; }
+  }
+  .floaty-text {
+    position: fixed;
+    font-weight: bold;
+    font-size: 0.85rem;
+    color: white;
+    text-shadow: 0 2px 4px rgba(0,0,0,0.7);
+    pointer-events: none;
+    z-index: 46;
+    white-space: nowrap;
+    animation: floatUp 1.1s ease-out forwards;
+    transform: translate(-50%, -50%);
+  }
+  @keyframes floatUp {
+    0% { transform: translate(-50%, -50%) scale(0.6); opacity: 0; }
+    20% { transform: translate(-50%, -140%) scale(1.15); opacity: 1; }
+    100% { transform: translate(-50%, -240%) scale(1); opacity: 0; }
+  }
+
+  /* ---- Screen shake on hits ---- */
+  @keyframes shake {
+    10%, 90% { transform: translateX(-2px); }
+    20%, 80% { transform: translateX(4px); }
+    30%, 50%, 70% { transform: translateX(-7px); }
+    40%, 60% { transform: translateX(7px); }
+  }
+  #app.shake { animation: shake 0.4s cubic-bezier(.36,.07,.19,.97) both; }
+
+  /* ---- Decorative animated waves along the bottom, purely CSS (no assets) ---- */
+  #waveFooter {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    height: 70px;
+    z-index: 0;
+    pointer-events: none;
+    overflow: hidden;
+    opacity: 0.4;
+  }
+  #waveFooter .wave {
+    position: absolute;
+    bottom: 0;
+    width: 200%;
+    height: 100%;
+    background-repeat: repeat-x;
+    background-size: 50% 100%;
+    background-image: radial-gradient(ellipse 50px 26px at 25px 100%, var(--sea-light) 60%, transparent 62%);
+    animation: waveScroll 12s linear infinite;
+  }
+  #waveFooter .wave2 {
+    animation-duration: 19s;
+    opacity: 0.55;
+    background-image: radial-gradient(ellipse 60px 30px at 30px 100%, var(--sea) 60%, transparent 62%);
+  }
+  @keyframes waveScroll {
+    from { transform: translateX(0); }
+    to { transform: translateX(-50%); }
+  }
+
+  /* ---- Ship emoji shown on own boards ---- */
+  .cell.own-ship { font-size: 15px; }
+  .ship-chip .chip-emoji { margin-right: 4px; }
 </style>
 </head>
 <body>
   <button id="soundToggle" title="Toggle sound">🔊</button>
   <div id="confettiLayer"></div>
+  <div id="effectsLayer"></div>
+  <div id="waveFooter"><div class="wave"></div><div class="wave wave2"></div></div>
   <div id="app">
     <h1>⚓ BATTLESHIP</h1>
     <div class="subtitle">Local network multiplayer</div>
@@ -389,6 +472,19 @@ let placementDone = false;
 let myName = '';
 let names = [null, null];
 
+// Whimsical, not literal — there's no dedicated submarine emoji in Unicode.
+const SHIP_EMOJI = {
+  Carrier: '🛳️',
+  Battleship: '🚢',
+  Cruiser: '⛴️',
+  Submarine: '🚤',
+  Destroyer: '⛵',
+};
+
+const HIT_QUOTES = ['Direct hit!', 'Boom!', "That'll leave a mark!", 'Nice shot!', 'Kaboom!'];
+const MISS_QUOTES = ['Splash!', 'Missed it!', 'Just water...', 'Try again!'];
+function pickQuote(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
 // ---------- Sound engine (Web Audio API, no external files, works fully offline) ----------
 const SFX = (() => {
   let ctx;
@@ -446,14 +542,22 @@ const SFX = (() => {
   return {
     setMuted(m) { muted = m; localStorage.setItem('battleship_muted', m ? '1' : '0'); },
     isMuted() { return muted; },
-    place() { tone(700, 0.08, 'square', 0.15); },
+    place() { tone(700, 0.08, 'square', 0.15); tone(950, 0.05, 'square', 0.08, 0.05); },
     fire() { sweep(600, 150, 0.25, 'sawtooth', 0.15); },
-    hit() { noise(0.35, 0.4, 700, 'lowpass'); tone(90, 0.3, 'sine', 0.3, 0.02); },
-    miss() { noise(0.4, 0.15, 3000, 'highpass'); },
-    sunk() { noise(0.6, 0.5, 400, 'lowpass'); sweep(300, 40, 0.7, 'sawtooth', 0.3); },
+    hit() {
+      noise(0.35, 0.45, 700, 'lowpass');
+      tone(90, 0.3, 'sine', 0.35, 0.02);
+      sweep(220, 60, 0.18, 'square', 0.2);
+    },
+    miss() { noise(0.35, 0.18, 2600, 'highpass'); tone(200, 0.15, 'sine', 0.05, 0.05); },
+    sunk() {
+      noise(0.7, 0.55, 350, 'lowpass');
+      sweep(320, 35, 0.8, 'sawtooth', 0.35);
+      tone(60, 0.6, 'sine', 0.3, 0.1);
+    },
     yourTurn() { tone(880, 0.12, 'sine', 0.15); tone(1175, 0.12, 'sine', 0.15, 0.13); },
-    win() { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.25, 'triangle', 0.2, i * 0.15)); },
-    lose() { [400, 350, 300, 250].forEach((f, i) => tone(f, 0.35, 'sawtooth', 0.15, i * 0.2)); },
+    win() { [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, 0.28, 'triangle', 0.22, i * 0.13)); },
+    lose() { [400, 350, 300, 250, 200].forEach((f, i) => tone(f, 0.4, 'sawtooth', 0.15, i * 0.2)); },
     click() { tone(500, 0.04, 'square', 0.1); },
   };
 })();
@@ -483,6 +587,48 @@ function launchConfetti() {
     layer.appendChild(piece);
   }
   setTimeout(() => { layer.innerHTML = ''; }, 4500);
+}
+
+// ---------- Hit/miss/sunk fun effects: particle bursts + floating text ----------
+const effectsLayer = document.getElementById('effectsLayer');
+const appEl = document.getElementById('app');
+
+function cellCenter(cellEl) {
+  const r = cellEl.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+}
+
+function spawnParticles(x, y, emoji, count) {
+  for (let i = 0; i < count; i++) {
+    const p = document.createElement('div');
+    p.className = 'particle';
+    p.textContent = emoji;
+    const angle = Math.random() * Math.PI * 2;
+    const dist = 28 + Math.random() * 42;
+    p.style.setProperty('--dx', Math.cos(angle) * dist + 'px');
+    p.style.setProperty('--dy', Math.sin(angle) * dist + 'px');
+    p.style.left = x + 'px';
+    p.style.top = y + 'px';
+    effectsLayer.appendChild(p);
+    setTimeout(() => p.remove(), 750);
+  }
+}
+
+function spawnFloatyText(x, y, text, color) {
+  const el = document.createElement('div');
+  el.className = 'floaty-text';
+  el.textContent = text;
+  el.style.left = x + 'px';
+  el.style.top = y + 'px';
+  if (color) el.style.color = color;
+  effectsLayer.appendChild(el);
+  setTimeout(() => el.remove(), 1150);
+}
+
+function shakeScreen() {
+  appEl.classList.remove('shake');
+  void appEl.offsetWidth; // restart the animation even if it's already mid-shake
+  appEl.classList.add('shake');
 }
 
 const statusEl = document.getElementById('status');
@@ -658,7 +804,7 @@ function buildShipList() {
   shipDefs.forEach((s, i) => {
     const chip = document.createElement('div');
     chip.className = 'ship-chip' + (i === currentShipIdx ? ' active' : '') + (i < placedShips.length ? ' placed' : '');
-    chip.textContent = s.name + ' (' + s.size + ')';
+    chip.textContent = (SHIP_EMOJI[s.name] || '') + ' ' + s.name + ' (' + s.size + ')';
     shipListEl.appendChild(chip);
   });
 }
@@ -714,9 +860,12 @@ function onPlacementCellClick(row, col) {
 function onPlaceAccepted(msg) {
   placedShips.push({ name: msg.shipName, cells: msg.cells });
   SFX.place();
+  const emoji = SHIP_EMOJI[msg.shipName] || '';
   msg.cells.forEach(([r, c]) => {
     myBoardOwnership[r][c] = true;
-    getCell(placementGrid, r, c).classList.add('own-ship');
+    const cell = getCell(placementGrid, r, c);
+    cell.classList.add('own-ship');
+    cell.textContent = emoji;
   });
   currentShipIdx++;
   clearPreview();
@@ -794,7 +943,12 @@ function startBattlePhase() {
   buildGrid(enemyGrid, BOARD_SIZE, onFireClick, null);
   buildGrid(myGrid, BOARD_SIZE, null, null);
   placedShips.forEach(ship => {
-    ship.cells.forEach(([r, c]) => getCell(myGrid, r, c).classList.add('own-ship'));
+    const emoji = SHIP_EMOJI[ship.name] || '';
+    ship.cells.forEach(([r, c]) => {
+      const cell = getCell(myGrid, r, c);
+      cell.classList.add('own-ship');
+      cell.textContent = emoji;
+    });
   });
   enemyGrid.classList.add('disabled');
 }
@@ -810,13 +964,24 @@ function onFireClick(row, col) {
 function applyFireResult(msg) {
   const targetGrid = (msg.by === myPlayer) ? enemyGrid : myGrid;
   const cell = getCell(targetGrid, msg.row, msg.col);
+  const { x, y } = cellCenter(cell);
   if (msg.result === 'hit') {
     cell.classList.add(msg.sunk ? 'sunk-cell' : 'hit');
     cell.textContent = msg.sunk ? '☠' : '✸';
-    if (msg.sunk) SFX.sunk(); else SFX.hit();
+    spawnParticles(x, y, '💥', msg.sunk ? 12 : 6);
+    shakeScreen();
+    if (msg.sunk) {
+      spawnFloatyText(x, y, 'SUNK!', '#ff8a4d');
+      SFX.sunk();
+    } else {
+      spawnFloatyText(x, y, pickQuote(HIT_QUOTES), '#ffd166');
+      SFX.hit();
+    }
   } else {
     cell.classList.add('miss');
     cell.textContent = '•';
+    spawnParticles(x, y, '💦', 4);
+    spawnFloatyText(x, y, pickQuote(MISS_QUOTES), '#cfe0ea');
     SFX.miss();
   }
   if (msg.sunk) {
@@ -833,7 +998,13 @@ function onGameOver(msg) {
   winBanner.classList.remove('hidden');
   statusEl.textContent = 'Game over.';
   rematchBtn.classList.remove('hidden');
-  if (won) { SFX.win(); launchConfetti(); } else { SFX.lose(); }
+  if (won) {
+    SFX.win();
+    launchConfetti();
+    spawnFloatyText(window.innerWidth / 2, window.innerHeight * 0.35, '🏆 VICTORY! 🏆', '#ffd166');
+  } else {
+    SFX.lose();
+  }
 }
 
 rematchBtn.addEventListener('click', () => {
