@@ -1,0 +1,847 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Battleship</title>
+<style>
+  :root {
+    --navy: #061a33;
+    --navy-light: #0d2b52;
+    --sea: #1b6ea3;
+    --sea-light: #4fa8d8;
+    --hit: #ff4d4d;
+    --miss-color: #b8c4ce;
+    --sunk: #6b1f27;
+    --sand: #f4f1de;
+    --gold: #f2b134;
+    --gold-bright: #ffd166;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: linear-gradient(180deg, var(--navy) 0%, var(--navy-light) 55%, #0a3d62 100%);
+    background-size: 100% 200%;
+    animation: waterShift 18s ease-in-out infinite;
+    color: var(--sand);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px 12px 60px;
+    position: relative;
+    overflow-x: hidden;
+  }
+  @keyframes waterShift {
+    0%, 100% { background-position: 0% 0%; }
+    50% { background-position: 0% 100%; }
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background:
+      radial-gradient(circle at 15% 20%, rgba(79,168,216,0.10) 0, transparent 35%),
+      radial-gradient(circle at 85% 75%, rgba(79,168,216,0.08) 0, transparent 40%);
+    pointer-events: none;
+    z-index: 0;
+  }
+  #app { position: relative; z-index: 1; width: 100%; display: flex; flex-direction: column; align-items: center; }
+
+  h1 {
+    letter-spacing: 4px;
+    font-size: 2.1rem;
+    margin: 6px 0 2px;
+    text-shadow: 0 2px 10px rgba(0,0,0,0.5), 0 0 20px rgba(79,168,216,0.3);
+  }
+  .subtitle { color: var(--sea-light); margin-bottom: 14px; font-size: 0.9rem; letter-spacing: 1px; }
+
+  #status {
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 10px;
+    padding: 12px 22px;
+    margin-bottom: 14px;
+    font-size: 1.05rem;
+    text-align: center;
+    min-height: 1.3em;
+    max-width: 520px;
+    backdrop-filter: blur(2px);
+  }
+  .hidden { display: none !important; }
+
+  /* Sound toggle */
+  #soundToggle {
+    position: fixed;
+    top: 14px;
+    right: 14px;
+    z-index: 50;
+    background: rgba(255,255,255,0.1);
+    border: 1px solid rgba(255,255,255,0.2);
+    color: var(--sand);
+    border-radius: 50%;
+    width: 42px;
+    height: 42px;
+    font-size: 1.2rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #soundToggle:hover { background: rgba(255,255,255,0.2); }
+
+  /* Scoreboard bar */
+  #scoreboard {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    background: rgba(0,0,0,0.25);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 14px;
+    padding: 10px 18px;
+    margin-bottom: 16px;
+    font-size: 1rem;
+  }
+  .score-name { font-weight: bold; }
+  .score-you { color: var(--gold-bright); }
+  .score-vs { opacity: 0.6; padding: 0 4px; }
+  .score-count {
+    background: rgba(255,255,255,0.12);
+    padding: 2px 9px;
+    border-radius: 10px;
+    margin-left: 6px;
+    font-size: 0.9rem;
+  }
+
+  /* Name entry */
+  #reconnectBanner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    background: rgba(230, 57, 70, 0.15);
+    border: 1px solid rgba(255,77,77,0.4);
+    border-radius: 16px;
+    padding: 24px 34px;
+    margin-top: 20px;
+    text-align: center;
+    max-width: 420px;
+  }
+  #reconnectBanner p { margin: 0; font-size: 1.05rem; }
+
+  #namePhase {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 16px;
+    padding: 34px 40px;
+    margin-top: 20px;
+    text-align: center;
+  }
+  #namePhase h2 { margin: 0 0 4px; font-size: 1.3rem; }
+  #nameInput {
+    font-size: 1.1rem;
+    padding: 10px 14px;
+    border-radius: 8px;
+    border: 2px solid var(--sea-light);
+    background: rgba(255,255,255,0.9);
+    color: var(--navy);
+    width: 220px;
+    text-align: center;
+  }
+  #nameInput:focus { outline: none; border-color: var(--gold); }
+
+  /* Placement controls */
+  #placementControls {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .ship-list {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-bottom: 14px;
+  }
+  .ship-chip {
+    background: var(--sea);
+    padding: 6px 12px;
+    border-radius: 20px;
+    font-size: 0.85rem;
+    border: 2px solid transparent;
+    transition: all 0.2s;
+  }
+  .ship-chip.active { border-color: var(--gold); background: var(--sea-light); font-weight: bold; box-shadow: 0 0 10px rgba(242,177,52,0.6); }
+  .ship-chip.placed { background: #2d5f3e; text-decoration: line-through; opacity: 0.65; }
+
+  button {
+    background: linear-gradient(180deg, var(--gold-bright), var(--gold));
+    color: var(--navy);
+    border: none;
+    padding: 11px 20px;
+    border-radius: 8px;
+    font-weight: bold;
+    font-size: 0.95rem;
+    cursor: pointer;
+    transition: transform 0.1s, box-shadow 0.2s;
+    box-shadow: 0 3px 0 rgba(0,0,0,0.25);
+  }
+  button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 8px rgba(242,177,52,0.35); }
+  button:active:not(:disabled) { transform: translateY(1px); box-shadow: 0 1px 0 rgba(0,0,0,0.25); }
+  button:disabled { opacity: 0.35; cursor: not-allowed; box-shadow: none; }
+  button.secondary { background: rgba(255,255,255,0.15); color: var(--sand); box-shadow: 0 3px 0 rgba(0,0,0,0.2); }
+
+  .boards {
+    display: flex;
+    gap: 36px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .board-wrap { text-align: center; }
+  .board-label { margin-bottom: 8px; font-size: 1rem; color: var(--sea-light); letter-spacing: 1px; }
+  .board-wrap.active-turn .board-label { color: var(--gold-bright); text-shadow: 0 0 8px rgba(242,177,52,0.7); }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(10, 32px);
+    grid-template-rows: repeat(10, 32px);
+    gap: 2px;
+    background: rgba(0,0,0,0.25);
+    padding: 6px;
+    border-radius: 10px;
+    border: 2px solid rgba(255,255,255,0.08);
+    transition: box-shadow 0.3s, border-color 0.3s;
+  }
+  .grid.my-turn-glow {
+    border-color: rgba(242,177,52,0.6);
+    box-shadow: 0 0 22px rgba(242,177,52,0.35);
+  }
+  .cell {
+    width: 32px;
+    height: 32px;
+    background: radial-gradient(circle at 35% 30%, var(--sea-light) 0%, var(--sea) 70%);
+    border-radius: 4px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    position: relative;
+    overflow: hidden;
+    transition: background 0.15s, transform 0.1s;
+  }
+  .cell.own-ship {
+    background: linear-gradient(135deg, var(--gold-bright), #c98a12);
+    box-shadow: inset 0 0 6px rgba(0,0,0,0.4);
+  }
+  .cell.preview-ok { background: var(--sea-light); box-shadow: inset 0 0 0 2px var(--gold); }
+  .cell.preview-bad { background: var(--hit); opacity: 0.5; }
+  .cell.hit {
+    background: radial-gradient(circle, #ff8a4d 0%, var(--hit) 55%, #8a0000 100%);
+    color: white;
+    animation: explode 0.4s ease-out;
+  }
+  .cell.sunk-cell {
+    background: radial-gradient(circle, #8a2c33 0%, var(--sunk) 70%);
+    color: white;
+    animation: explode 0.5s ease-out;
+  }
+  .cell.miss {
+    background: radial-gradient(circle at 35% 30%, #cfe0ea 0%, var(--miss-color) 70%);
+    color: #33566e;
+    animation: splash 0.5s ease-out;
+  }
+  @keyframes explode {
+    0% { transform: scale(0.3); filter: brightness(2.5); }
+    40% { transform: scale(1.25); }
+    100% { transform: scale(1); filter: brightness(1); }
+  }
+  @keyframes splash {
+    0% { transform: scale(0.2); opacity: 0.3; }
+    60% { transform: scale(1.3); }
+    100% { transform: scale(1); }
+  }
+  .grid.disabled .cell { cursor: default; }
+  .grid.no-hover .cell:hover { transform: none; }
+  #battleBoards .grid:not(.disabled) .cell:hover { transform: scale(1.08); box-shadow: 0 0 10px rgba(79,168,216,0.7); }
+
+  #winBanner {
+    font-size: 1.8rem;
+    font-weight: bold;
+    color: var(--gold-bright);
+    margin: 10px 0 18px;
+    text-align: center;
+    text-shadow: 0 0 18px rgba(242,177,52,0.6);
+    animation: bannerPop 0.5s ease-out;
+  }
+  @keyframes bannerPop {
+    0% { transform: scale(0.5); opacity: 0; }
+    70% { transform: scale(1.1); }
+    100% { transform: scale(1); opacity: 1; }
+  }
+
+  #credit {
+    margin-top: 26px;
+    font-size: 0.78rem;
+    color: rgba(244,241,222,0.55);
+    letter-spacing: 0.5px;
+    text-align: center;
+  }
+  #credit span { color: rgba(244,241,222,0.75); }
+
+  #confettiLayer {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    overflow: hidden;
+    z-index: 40;
+  }
+  .confetti-piece {
+    position: absolute;
+    top: -20px;
+    width: 9px;
+    height: 14px;
+    opacity: 0.9;
+    animation-name: confettiFall;
+    animation-timing-function: linear;
+    animation-fill-mode: forwards;
+  }
+  @keyframes confettiFall {
+    0% { transform: translateY(0) rotate(0deg); }
+    100% { transform: translateY(105vh) rotate(540deg); }
+  }
+</style>
+</head>
+<body>
+  <button id="soundToggle" title="Toggle sound">🔊</button>
+  <div id="confettiLayer"></div>
+  <div id="app">
+    <h1>⚓ BATTLESHIP</h1>
+    <div class="subtitle">Local network multiplayer</div>
+    <div id="status">Connecting...</div>
+    <div id="scoreboard" class="hidden"></div>
+
+    <div id="reconnectBanner" class="hidden">
+      <p id="reconnectMessage">Connection lost.</p>
+      <button id="reloadBtn">Reload page</button>
+    </div>
+
+    <div id="namePhase" class="hidden">
+      <h2>What's your name, Captain?</h2>
+      <input id="nameInput" type="text" maxlength="20" placeholder="Enter your name" />
+      <button id="nameSubmitBtn">Set sail!</button>
+    </div>
+
+    <div id="placementPhase" class="hidden">
+      <div id="placementControls">
+        <button id="rotateBtn">Rotate: Horizontal ↔</button>
+        <button id="clearBtn" class="secondary">Clear board</button>
+        <button id="randomBtn" class="secondary">Random placement</button>
+        <button id="readyBtn" disabled>Ready!</button>
+      </div>
+      <div class="ship-list" id="shipList"></div>
+      <div class="boards">
+        <div class="board-wrap">
+          <div class="board-label">Place your fleet</div>
+          <div class="grid no-hover" id="placementGrid"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="battlePhase" class="hidden">
+      <div id="winBanner" class="hidden"></div>
+      <div class="boards" id="battleBoards">
+        <div class="board-wrap" id="enemyBoardWrap">
+          <div class="board-label">Enemy waters — click to fire</div>
+          <div class="grid" id="enemyGrid"></div>
+        </div>
+        <div class="board-wrap">
+          <div class="board-label">Your fleet</div>
+          <div class="grid disabled" id="myGrid"></div>
+        </div>
+      </div>
+      <div style="text-align:center; margin-top:18px;">
+        <button id="rematchBtn" class="hidden">Play again</button>
+      </div>
+    </div>
+
+    <div id="credit">⚓ Built by <span>Andreas Andersson</span> — with a little help from Claude AI (and a bug-squashing pass by Claude Code)</div>
+  </div>
+
+<script>
+const BOARD_SIZE = 10;
+let ws;
+let myPlayer = null;
+let horizontal = true;
+let shipDefs = [];
+let currentShipIdx = 0;
+let placedShips = [];
+let myBoardOwnership = [];
+let placementDone = false;
+let myName = '';
+let names = [null, null];
+
+// ---------- Sound engine (Web Audio API, no external files, works fully offline) ----------
+const SFX = (() => {
+  let ctx;
+  let muted = localStorage.getItem('battleship_muted') === '1';
+  function ensureCtx() {
+    if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (ctx.state === 'suspended') ctx.resume();
+    return ctx;
+  }
+  function tone(freq, dur, type, vol, delay) {
+    if (muted) return;
+    delay = delay || 0;
+    const c = ensureCtx();
+    const osc = c.createOscillator();
+    const gain = c.createGain();
+    osc.type = type || 'sine';
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(vol, c.currentTime + delay);
+    gain.gain.exponentialRampToValueAtTime(0.001, c.currentTime + delay + dur);
+    osc.connect(gain); gain.connect(c.destination);
+    osc.start(c.currentTime + delay);
+    osc.stop(c.currentTime + delay + dur + 0.02);
+  }
+  function sweep(freqStart, freqEnd, dur, type, vol) {
+    if (muted) return;
+    const c = ensureCtx();
+    const osc = c.createOscillator();
+    const gain = c.createGain();
+    osc.type = type || 'sine';
+    osc.frequency.setValueAtTime(freqStart, c.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(freqEnd, 1), c.currentTime + dur);
+    gain.gain.setValueAtTime(vol, c.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, c.currentTime + dur);
+    osc.connect(gain); gain.connect(c.destination);
+    osc.start(); osc.stop(c.currentTime + dur + 0.02);
+  }
+  function noise(dur, vol, filterFreq, filterType) {
+    if (muted) return;
+    const c = ensureCtx();
+    const bufferSize = Math.floor(c.sampleRate * dur);
+    const buffer = c.createBuffer(1, bufferSize, c.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+    const src = c.createBufferSource();
+    src.buffer = buffer;
+    const filter = c.createBiquadFilter();
+    filter.type = filterType || 'lowpass';
+    filter.frequency.value = filterFreq || 1000;
+    const gain = c.createGain();
+    gain.gain.setValueAtTime(vol, c.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, c.currentTime + dur);
+    src.connect(filter); filter.connect(gain); gain.connect(c.destination);
+    src.start();
+  }
+  return {
+    setMuted(m) { muted = m; localStorage.setItem('battleship_muted', m ? '1' : '0'); },
+    isMuted() { return muted; },
+    place() { tone(700, 0.08, 'square', 0.15); },
+    fire() { sweep(600, 150, 0.25, 'sawtooth', 0.15); },
+    hit() { noise(0.35, 0.4, 700, 'lowpass'); tone(90, 0.3, 'sine', 0.3, 0.02); },
+    miss() { noise(0.4, 0.15, 3000, 'highpass'); },
+    sunk() { noise(0.6, 0.5, 400, 'lowpass'); sweep(300, 40, 0.7, 'sawtooth', 0.3); },
+    yourTurn() { tone(880, 0.12, 'sine', 0.15); tone(1175, 0.12, 'sine', 0.15, 0.13); },
+    win() { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.25, 'triangle', 0.2, i * 0.15)); },
+    lose() { [400, 350, 300, 250].forEach((f, i) => tone(f, 0.35, 'sawtooth', 0.15, i * 0.2)); },
+    click() { tone(500, 0.04, 'square', 0.1); },
+  };
+})();
+
+const soundToggleBtn = document.getElementById('soundToggle');
+function refreshSoundIcon() { soundToggleBtn.textContent = SFX.isMuted() ? '🔇' : '🔊'; }
+refreshSoundIcon();
+soundToggleBtn.addEventListener('click', () => {
+  SFX.setMuted(!SFX.isMuted());
+  refreshSoundIcon();
+  if (!SFX.isMuted()) SFX.click();
+});
+
+// ---------- Confetti ----------
+function launchConfetti() {
+  const layer = document.getElementById('confettiLayer');
+  layer.innerHTML = '';
+  const colors = ['#f2b134', '#ffd166', '#4fa8d8', '#ff4d4d', '#f4f1de', '#6bbf59'];
+  for (let i = 0; i < 70; i++) {
+    const piece = document.createElement('div');
+    piece.className = 'confetti-piece';
+    piece.style.left = Math.random() * 100 + 'vw';
+    piece.style.background = colors[Math.floor(Math.random() * colors.length)];
+    piece.style.animationDuration = (2.2 + Math.random() * 1.8) + 's';
+    piece.style.animationDelay = (Math.random() * 0.6) + 's';
+    piece.style.transform = 'rotate(' + Math.floor(Math.random() * 360) + 'deg)';
+    layer.appendChild(piece);
+  }
+  setTimeout(() => { layer.innerHTML = ''; }, 4500);
+}
+
+const statusEl = document.getElementById('status');
+const reconnectBanner = document.getElementById('reconnectBanner');
+const reconnectMessage = document.getElementById('reconnectMessage');
+const reloadBtn = document.getElementById('reloadBtn');
+const namePhase = document.getElementById('namePhase');
+const nameInput = document.getElementById('nameInput');
+const nameSubmitBtn = document.getElementById('nameSubmitBtn');
+const scoreboardEl = document.getElementById('scoreboard');
+const placementPhase = document.getElementById('placementPhase');
+const battlePhase = document.getElementById('battlePhase');
+const placementGrid = document.getElementById('placementGrid');
+const enemyGrid = document.getElementById('enemyGrid');
+const myGrid = document.getElementById('myGrid');
+const enemyBoardWrap = document.getElementById('enemyBoardWrap');
+const shipListEl = document.getElementById('shipList');
+const readyBtn = document.getElementById('readyBtn');
+const rotateBtn = document.getElementById('rotateBtn');
+const clearBtn = document.getElementById('clearBtn');
+const randomBtn = document.getElementById('randomBtn');
+const rematchBtn = document.getElementById('rematchBtn');
+const winBanner = document.getElementById('winBanner');
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(proto + '://' + location.host);
+  ws.onopen = () => { statusEl.textContent = 'Connected. Waiting for assignment...'; };
+  ws.onclose = () => { statusEl.textContent = 'Disconnected from server.'; };
+  ws.onmessage = (ev) => handleMessage(JSON.parse(ev.data));
+}
+
+reloadBtn.addEventListener('click', () => location.reload());
+
+// Locks the whole game UI and shows a "Reload page" button. Used whenever this
+// browser's session is no longer valid on the server (opponent left, server
+// restarted, etc.) so a stray click can't crash anything — it just prompts a reload.
+function lockGame(message) {
+  namePhase.classList.add('hidden');
+  placementPhase.classList.add('hidden');
+  battlePhase.classList.add('hidden');
+  reconnectMessage.textContent = message;
+  reconnectBanner.classList.remove('hidden');
+  statusEl.textContent = '';
+}
+
+function handleMessage(msg) {
+  switch (msg.type) {
+    case 'welcome':
+      myPlayer = msg.player;
+      showNamePhase();
+      break;
+    case 'waiting':
+      statusEl.textContent = 'Waiting for the other player to connect...';
+      break;
+    case 'full':
+      statusEl.textContent = 'Game is full. Only two players can play at once.';
+      break;
+    case 'nameAccepted':
+      myName = msg.name;
+      statusEl.textContent = 'Welcome, Captain ' + myName + '! Waiting for the other captain...';
+      break;
+    case 'scoreboard':
+      names = msg.names;
+      updateScoreboard(msg.scores);
+      break;
+    case 'startPlacement':
+      shipDefs = msg.shipDefs;
+      names = msg.names || names;
+      startPlacementPhase();
+      break;
+    case 'placeAccepted':
+      onPlaceAccepted(msg);
+      break;
+    case 'placeRejected':
+      statusEl.textContent = msg.reason;
+      break;
+    case 'placementCleared':
+      resetPlacementUI();
+      break;
+    case 'opponentReady':
+      if (!placementDone) statusEl.textContent = 'Opponent is ready! Finish placing your ships.';
+      break;
+    case 'gameStart':
+      startBattlePhase();
+      break;
+    case 'yourTurn':
+      statusEl.textContent = 'Your turn — fire away!';
+      enemyGrid.classList.remove('disabled');
+      enemyGrid.classList.add('my-turn-glow');
+      enemyBoardWrap.classList.add('active-turn');
+      SFX.yourTurn();
+      break;
+    case 'opponentTurn':
+      statusEl.textContent = "Opponent's turn... waiting.";
+      enemyGrid.classList.add('disabled');
+      enemyGrid.classList.remove('my-turn-glow');
+      enemyBoardWrap.classList.remove('active-turn');
+      break;
+    case 'fireResult':
+      applyFireResult(msg);
+      break;
+    case 'gameOver':
+      onGameOver(msg);
+      break;
+    case 'opponentDisconnected':
+      lockGame('The other captain disconnected. Reload this page to start a new game.');
+      break;
+    case 'sessionExpired':
+      lockGame('This game session ended (probably because the other player reloaded or reconnected). Reload this page to rejoin.');
+      break;
+  }
+}
+
+// ---------- Name phase ----------
+function showNamePhase() {
+  const saved = localStorage.getItem('battleship_name');
+  if (saved) nameInput.value = saved;
+  namePhase.classList.remove('hidden');
+  statusEl.textContent = 'You are Player ' + myPlayer + '. Enter your name to continue.';
+  nameInput.focus();
+}
+
+function submitName() {
+  const val = nameInput.value.trim().slice(0, 20);
+  if (!val) { nameInput.focus(); return; }
+  localStorage.setItem('battleship_name', val);
+  SFX.click();
+  ws.send(JSON.stringify({ type: 'setName', name: val }));
+  namePhase.classList.add('hidden');
+}
+nameSubmitBtn.addEventListener('click', submitName);
+nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitName(); });
+
+// ---------- Scoreboard ----------
+function updateScoreboard(scores) {
+  if (!names[0] && !names[1]) { scoreboardEl.classList.add('hidden'); return; }
+  const n1 = names[0] || '(waiting)';
+  const n2 = names[1] || '(waiting)';
+  const isP1You = myPlayer === 1;
+  scoreboardEl.innerHTML =
+    '<span class="score-name ' + (isP1You ? 'score-you' : '') + '">' + escapeHtml(n1) +
+    '<span class="score-count">' + (scores.p1 || 0) + '</span></span>' +
+    '<span class="score-vs">vs</span>' +
+    '<span class="score-name ' + (!isP1You ? 'score-you' : '') + '">' + escapeHtml(n2) +
+    '<span class="score-count">' + (scores.p2 || 0) + '</span></span>';
+  scoreboardEl.classList.remove('hidden');
+}
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ---------- Placement phase ----------
+function startPlacementPhase() {
+  placementDone = false;
+  currentShipIdx = 0;
+  placedShips = [];
+  myBoardOwnership = Array.from({length: BOARD_SIZE}, () => Array(BOARD_SIZE).fill(false));
+  placementPhase.classList.remove('hidden');
+  battlePhase.classList.add('hidden');
+  winBanner.classList.add('hidden');
+  rematchBtn.classList.add('hidden');
+  statusEl.textContent = 'Place your ships. Click a starting cell for the highlighted ship.';
+  buildShipList();
+  buildGrid(placementGrid, BOARD_SIZE, onPlacementCellClick, onPlacementCellHover);
+  readyBtn.disabled = true;
+}
+
+function buildShipList() {
+  shipListEl.innerHTML = '';
+  shipDefs.forEach((s, i) => {
+    const chip = document.createElement('div');
+    chip.className = 'ship-chip' + (i === currentShipIdx ? ' active' : '') + (i < placedShips.length ? ' placed' : '');
+    chip.textContent = s.name + ' (' + s.size + ')';
+    shipListEl.appendChild(chip);
+  });
+}
+
+function buildGrid(gridEl, size, onClick, onHover) {
+  gridEl.innerHTML = '';
+  for (let r = 0; r < size; r++) {
+    for (let c = 0; c < size; c++) {
+      const cell = document.createElement('div');
+      cell.className = 'cell';
+      cell.dataset.row = r;
+      cell.dataset.col = c;
+      if (onClick) cell.addEventListener('click', () => onClick(r, c));
+      if (onHover) cell.addEventListener('mouseenter', () => onHover(r, c));
+      gridEl.appendChild(cell);
+    }
+  }
+}
+
+function getCell(gridEl, r, c) {
+  return gridEl.children[r * BOARD_SIZE + c];
+}
+
+function onPlacementCellHover(row, col) {
+  if (placementDone || currentShipIdx >= shipDefs.length) return;
+  clearPreview();
+  const size = shipDefs[currentShipIdx].size;
+  const cells = [];
+  let ok = true;
+  for (let i = 0; i < size; i++) {
+    const r = horizontal ? row : row + i;
+    const c = horizontal ? col + i : col;
+    if (r < 0 || r >= BOARD_SIZE || c < 0 || c >= BOARD_SIZE || myBoardOwnership[r][c]) { ok = false; }
+    cells.push([r, c]);
+  }
+  cells.forEach(([r, c]) => {
+    if (r < 0 || r >= BOARD_SIZE || c < 0 || c >= BOARD_SIZE) return;
+    const cell = getCell(placementGrid, r, c);
+    cell.classList.add(ok ? 'preview-ok' : 'preview-bad');
+  });
+}
+
+function clearPreview() {
+  [...placementGrid.children].forEach(c => c.classList.remove('preview-ok', 'preview-bad'));
+}
+
+function onPlacementCellClick(row, col) {
+  if (placementDone || currentShipIdx >= shipDefs.length) return;
+  const ship = shipDefs[currentShipIdx];
+  ws.send(JSON.stringify({ type: 'place', row, col, size: ship.size, horizontal, shipName: ship.name }));
+}
+
+function onPlaceAccepted(msg) {
+  placedShips.push({ name: msg.shipName, cells: msg.cells });
+  SFX.place();
+  msg.cells.forEach(([r, c]) => {
+    myBoardOwnership[r][c] = true;
+    getCell(placementGrid, r, c).classList.add('own-ship');
+  });
+  currentShipIdx++;
+  clearPreview();
+  buildShipList();
+  if (currentShipIdx >= shipDefs.length) {
+    placementDone = true;
+    statusEl.textContent = 'All ships placed! Click Ready when you are.';
+    readyBtn.disabled = false;
+  } else {
+    statusEl.textContent = 'Place your ' + shipDefs[currentShipIdx].name + ' (' + shipDefs[currentShipIdx].size + ' cells).';
+  }
+}
+
+function resetPlacementUI() {
+  startPlacementPhase();
+}
+
+rotateBtn.addEventListener('click', () => {
+  horizontal = !horizontal;
+  rotateBtn.textContent = 'Rotate: ' + (horizontal ? 'Horizontal ↔' : 'Vertical ↕');
+  SFX.click();
+});
+
+clearBtn.addEventListener('click', () => {
+  SFX.click();
+  ws.send(JSON.stringify({ type: 'clearPlacement' }));
+});
+
+randomBtn.addEventListener('click', () => {
+  SFX.click();
+  ws.send(JSON.stringify({ type: 'clearPlacement' }));
+  setTimeout(() => {
+    const occ = Array.from({length: BOARD_SIZE}, () => Array(BOARD_SIZE).fill(false));
+    const placements = [];
+    shipDefs.forEach(ship => {
+      let placed = false;
+      let attempts = 0;
+      while (!placed && attempts < 500) {
+        attempts++;
+        const horiz = Math.random() < 0.5;
+        const row = Math.floor(Math.random() * BOARD_SIZE);
+        const col = Math.floor(Math.random() * BOARD_SIZE);
+        const cells = [];
+        let ok = true;
+        for (let i = 0; i < ship.size; i++) {
+          const r = horiz ? row : row + i;
+          const c = horiz ? col + i : col;
+          if (r >= BOARD_SIZE || c >= BOARD_SIZE || occ[r][c]) { ok = false; break; }
+          cells.push([r, c]);
+        }
+        if (ok) {
+          cells.forEach(([r, c]) => { occ[r][c] = true; });
+          placements.push({ row, col, size: ship.size, horizontal: horiz, shipName: ship.name });
+          placed = true;
+        }
+      }
+    });
+    placements.forEach((p, i) => {
+      setTimeout(() => ws.send(JSON.stringify({ type: 'place', ...p })), i * 30);
+    });
+  }, 150);
+});
+
+readyBtn.addEventListener('click', () => {
+  SFX.click();
+  ws.send(JSON.stringify({ type: 'ready' }));
+  readyBtn.disabled = true;
+  statusEl.textContent = 'Waiting for opponent to finish placing ships...';
+});
+
+// ---------- Battle phase ----------
+function startBattlePhase() {
+  placementPhase.classList.add('hidden');
+  battlePhase.classList.remove('hidden');
+  buildGrid(enemyGrid, BOARD_SIZE, onFireClick, null);
+  buildGrid(myGrid, BOARD_SIZE, null, null);
+  placedShips.forEach(ship => {
+    ship.cells.forEach(([r, c]) => getCell(myGrid, r, c).classList.add('own-ship'));
+  });
+  enemyGrid.classList.add('disabled');
+}
+
+function onFireClick(row, col) {
+  if (enemyGrid.classList.contains('disabled')) return;
+  const cell = getCell(enemyGrid, row, col);
+  if (cell.classList.contains('hit') || cell.classList.contains('miss') || cell.classList.contains('sunk-cell')) return;
+  SFX.fire();
+  ws.send(JSON.stringify({ type: 'fire', row, col }));
+}
+
+function applyFireResult(msg) {
+  const targetGrid = (msg.by === myPlayer) ? enemyGrid : myGrid;
+  const cell = getCell(targetGrid, msg.row, msg.col);
+  if (msg.result === 'hit') {
+    cell.classList.add(msg.sunk ? 'sunk-cell' : 'hit');
+    cell.textContent = msg.sunk ? '☠' : '✸';
+    if (msg.sunk) SFX.sunk(); else SFX.hit();
+  } else {
+    cell.classList.add('miss');
+    cell.textContent = '•';
+    SFX.miss();
+  }
+  if (msg.sunk) {
+    const who = (msg.by === myPlayer) ? 'You' : 'Opponent';
+    statusEl.textContent = who + ' sunk the ' + msg.shipName + '!';
+  }
+}
+
+function onGameOver(msg) {
+  enemyGrid.classList.add('disabled');
+  enemyGrid.classList.remove('my-turn-glow');
+  const won = msg.winner === myPlayer;
+  winBanner.textContent = won ? '🏆 YOU WIN, CAPTAIN ' + myName.toUpperCase() + '! 🏆' : '💥 You lost — ' + msg.winnerName + ' wins!';
+  winBanner.classList.remove('hidden');
+  statusEl.textContent = 'Game over.';
+  rematchBtn.classList.remove('hidden');
+  if (won) { SFX.win(); launchConfetti(); } else { SFX.lose(); }
+}
+
+rematchBtn.addEventListener('click', () => {
+  SFX.click();
+  ws.send(JSON.stringify({ type: 'rematch' }));
+});
+
+connect();
+</script>
+</body>
+</html>

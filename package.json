@@ -1,0 +1,12 @@
+{
+  "name": "battleship-lan",
+  "version": "1.0.0",
+  "description": "Simple local-network multiplayer Battleship for two players.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

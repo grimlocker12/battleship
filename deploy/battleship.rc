@@ -1,0 +1,43 @@
+#!/bin/sh
+#
+# rc.d script for the Battleship game server.
+# Install to: /usr/local/etc/rc.d/battleship  (inside the jail)
+#
+# This uses FreeBSD's built-in daemon(8) supervisor with the -r (restart)
+# flag, so if the node process ever crashes for any reason, it is
+# automatically restarted within a second or two — no cron job, no extra
+# software (pm2, forever, etc.) needed.
+#
+# PROVIDE: battleship
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="battleship"
+rcvar="${name}_enable"
+
+: "${battleship_enable:=NO}"
+: "${battleship_dir:=/usr/local/battleship}"
+: "${battleship_node:=/usr/local/bin/node}"
+: "${battleship_user:=root}"
+: "${battleship_port:=3000}"
+
+pidfile="/var/run/${name}.pid"
+logfile="/var/log/${name}.log"
+
+command="/usr/sbin/daemon"
+procname="/usr/sbin/daemon"
+# -r  : restart the child automatically if it ever exits/crashes
+# -f  : detach stdin from the terminal
+# -P  : "supervisor" pidfile — this is what `service battleship stop` signals,
+#       which cleanly stops the supervisor (and its child) rather than
+#       triggering the -r auto-restart
+# -t  : process title shown in ps/logs
+# -o  : capture the node process's stdout/stderr into a log file
+command_args="-r -f -P ${pidfile} -t ${name} -u ${battleship_user} -o ${logfile} \
+  /usr/bin/env PORT=${battleship_port} BATTLESHIP_SCORES_FILE=${battleship_dir}/scores.json \
+  ${battleship_node} ${battleship_dir}/server.js"
+
+load_rc_config "$name"
+run_rc_command "$1"
