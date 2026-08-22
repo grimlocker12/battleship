@@ -59,9 +59,28 @@ function saveScores(scores) {
 let scores = loadScores(); // { "Alice": 3, "Bob": 1, ... }
 
 // ---- Simple static file server for the client page ----
+const PUBLIC_DIR = path.join(__dirname, 'public');
+
 const server = http.createServer((req, res) => {
-  let filePath = req.url === '/' ? '/index.html' : req.url;
-  filePath = path.join(__dirname, 'public', filePath);
+  let urlPath = req.url === '/' ? '/index.html' : req.url.split('?')[0];
+  try {
+    urlPath = decodeURIComponent(urlPath);
+  } catch {
+    res.writeHead(400);
+    res.end('Bad request');
+    return;
+  }
+
+  // path.join() collapses any "../" segments, but the result can still land
+  // outside PUBLIC_DIR (e.g. a request for "/../server.js") — reject those
+  // instead of serving whatever file it resolved to.
+  const filePath = path.join(PUBLIC_DIR, urlPath);
+  if (filePath !== PUBLIC_DIR && !filePath.startsWith(PUBLIC_DIR + path.sep)) {
+    res.writeHead(403);
+    res.end('Forbidden');
+    return;
+  }
+
   fs.readFile(filePath, (err, data) => {
     if (err) {
       res.writeHead(404);
