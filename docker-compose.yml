@@ -1,0 +1,22 @@
+# For local testing (Windows/Mac/Linux with Docker Desktop or docker-ce):
+#   docker compose up --build
+# Then open http://localhost:3000
+#
+# This is NOT how the app runs on TrueNAS SCALE — SCALE's Apps system uses
+# its own Kubernetes-based "Custom App" UI, not docker-compose directly. See
+# deploy/DOCKER-TRUENAS-SCALE.md for that. This file exists so you (or
+# anyone picking this project up) can build and test the image quickly on a
+# regular PC before deploying it.
+
+services:
+  battleship:
+    build: .
+    image: battleship:local
+    ports:
+      - "3000:3000"
+    volumes:
+      - battleship-data:/data
+    restart: unless-stopped
+
+volumes:
+  battleship-data:
