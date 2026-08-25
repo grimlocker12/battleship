@@ -10,51 +10,35 @@ Once set up: the container starts automatically when the NAS boots, and
 Kubernetes restarts it automatically if it ever crashes. Nobody ever starts
 a server manually.
 
-## Two ways to get the image onto your NAS
+## The image lives on GitHub Container Registry
 
-You were given (or can build) a `battleship-image.tar.gz` file — this is
-the whole app as a self-contained Docker image. There are two ways to use
-it, pick whichever you prefer:
+The built image is pushed to `ghcr.io/grimlocker12/battleship`, tagged
+both `1.1.0` and `latest`. SCALE pulls it directly — no file transfer to
+the NAS needed for a normal update.
 
-**Option A — Import the image directly (recommended: no accounts, nothing
-leaves your network).** Copy the tar file onto the NAS and load it straight
-into SCALE's local image store. Covered in step 2 below.
+**Before SCALE can pull it: make the package public (one-time).** GHCR
+packages are private by default, and a private package needs a registry
+pull secret configured in SCALE, which is extra setup for no real benefit
+here — there's nothing sensitive in this image, it's just the game. On
+GitHub: your profile → **Packages** → **battleship** → **Package settings**
+(bottom right) → **Change visibility** → **Public**. If you'd rather keep
+it private instead, SCALE's Custom App form has a "Container Registry
+Credentials" section where you can add a GitHub Personal Access Token
+(scope `read:packages`) — mentioned here for completeness, but public is
+simpler and is what the rest of this guide assumes.
 
-**Option B — Push to Docker Hub first.** If you'd rather pull the image
-from a registry (e.g. so you can update it by just re-pulling a tag), build
-and push it from your own PC:
-```
-docker build -t <your-dockerhub-username>/battleship:latest .
-docker push <your-dockerhub-username>/battleship:latest
-```
-Then in step 4 below, use `docker.io/<your-dockerhub-username>/battleship`
-as the image repository instead of importing a tar.
-
-The rest of this guide assumes Option A.
-
-## 1. Get `battleship-image.tar.gz` onto the NAS
-
-Upload it to any dataset over SMB/SFTP, e.g. into
-`/mnt/<your-pool>/apps/battleship/`. (If you don't have the tar file and
-want to build it yourself instead: unzip the project source and run
-`docker build -t battleship:latest .` in that folder on any machine with
-Docker installed, then `docker save battleship:latest | gzip > battleship-image.tar.gz`.)
-
-## 2. Import the image into SCALE
-
-Open a shell on the TrueNAS host itself (System Settings → Shell in the UI,
-or SSH), then:
+**Alternative, if you'd rather not use a registry at all:** you can still
+build the image yourself and import it directly into SCALE's local
+containerd store with no registry involved —
+`docker save battleship:latest | gzip > battleship-image.tar.gz`, copy that
+onto the NAS, then from a host shell:
 ```sh
-k3s ctr -n k8s.io images import /mnt/<your-pool>/apps/battleship/battleship-image.tar.gz
+k3s ctr -n k8s.io images import /path/to/battleship-image.tar.gz
 ```
-This loads the image into the same containerd store the Apps system pulls
-from, tagged `battleship:1.1.0` and `battleship:latest` — no registry, no
-internet access needed. Confirm it's there:
-```sh
-k3s ctr -n k8s.io images ls | grep battleship
-```
+If you go this route, use `battleship` (not `ghcr.io/...`) as the image
+repository in step 4 below.
 
-## 3. Create a dataset for the persistent scoreboard
+## 1. Create a dataset for the persistent scoreboard
 
 In the TrueNAS UI: **Datasets** → create a new dataset under a pool of your
 choice, e.g. `<your-pool>/apps/battleship-data`. This is where
@@ -71,15 +55,16 @@ chown -R 1000:1000 /mnt/<your-pool>/apps/battleship-data
 the container as root and skip the chown, which is fine for a
 home/LAN-only, two-kids setup if you'd prefer the simplicity.)
 
-## 4. Create the Custom App
+## 2. Create the Custom App
 
 TrueNAS UI → **Apps** → **Discover Apps** → **Custom App** (top right).
 
 - **Application Name:** `battleship`
-- **Image repository:** `battleship`  **Image tag:** `1.1.0` (or `latest`)
-  **Image pull policy:** `IfNotPresent` — this is important: it tells
-  Kubernetes to use the image you just imported instead of trying to pull
-  from Docker Hub (there is no public `battleship` image).
+- **Image repository:** `ghcr.io/grimlocker12/battleship`  **Image tag:**
+  `1.1.0` (or `latest`)
+  **Image pull policy:** `IfNotPresent` (pulls once, reuses it after that —
+  switch to `Always` if you want it to check for a newer `latest` on every
+  restart instead).
 - **Container Port:** `3000`, protocol TCP → **Node Port**: pick a free
   port in the range the UI shows you (e.g. `30300`). This is the port
   you'll actually browse to.
@@ -92,9 +77,10 @@ TrueNAS UI → **Apps** → **Discover Apps** → **Custom App** (top right).
 Click **Install**. Give it a minute; check **Apps → Installed Apps →
 battleship** for status, and the **Logs** tab there if it doesn't come up
 (look for the same "Battleship server running!" banner you'd see running
-it locally).
+it locally). If it fails to pull the image, double check the package was
+made public in the step above.
 
-## 5. Connect from your kids' PCs
+## 3. Connect from your kids' PCs
 
 Find your NAS's IP (or hostname, if you have one set up), then browse to:
 ```
@@ -102,7 +88,7 @@ http://<nas-ip>:<the node port you chose, e.g. 30300>
 ```
 Bookmark it on both PCs.
 
-## 6. Confirm crash-recovery and reboot behavior
+## 4. Confirm crash-recovery and reboot behavior
 
 Worth testing once so you trust it, same idea as the old jail setup:
 - **Crash recovery:** Apps → battleship → stop the pod (or `k3s kubectl
@@ -113,9 +99,11 @@ Worth testing once so you trust it, same idea as the old jail setup:
 
 ## Notes
 
-- **Updating the game later:** build a new image, import it under a new
-  tag (e.g. `1.2.0`), then edit the Custom App and bump the image tag.
-  `scores.json` lives on the separate dataset, untouched by app updates.
+- **Updating the game later:** build and push a new image tag (e.g.
+  `docker build -t ghcr.io/grimlocker12/battleship:1.2.0 . && docker push
+  ghcr.io/grimlocker12/battleship:1.2.0`), then edit the Custom App and
+  bump the image tag to match. `scores.json` lives on the separate dataset,
+  untouched by app updates.
 - **Migrating your old TrueNAS CORE scoreboard:** if you have a
   `scores.json` from the old jail setup, copy it into the new dataset
   before first start — the server auto-detects and upgrades the old
