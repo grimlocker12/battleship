@@ -1,6 +1,6 @@
 // Battleship LAN server
 // Run with: node server.js
-// Then have both kids open a browser to: http://<this-PC's-LAN-IP>:3000
+// Then have 2-4 players open a browser to: http://<this-PC's-LAN-IP>:3000
 //
 // Configurable via environment variables (useful when running as a permanent
 // service, e.g. in a TrueNAS jail): PORT, BATTLESHIP_SCORES_FILE
@@ -19,11 +19,13 @@ const SHIP_DEFS = [
   { name: 'Destroyer', size: 2 },
 ];
 const BOARD_SIZE = 10;
+const MAX_SEATS = 4;
+const MIN_TO_START = 2;
 const SCORES_FILE = process.env.BATTLESHIP_SCORES_FILE || path.join(__dirname, 'scores.json');
 
 // ---- Never let this process die silently or take the whole service down ----
 // When running as a permanently-installed service (e.g. a TrueNAS jail with
-// daemon(8) -r), a crash means both kids lose their connection and have to
+// daemon(8) -r), a crash means everyone loses their connection and has to
 // reload. These handlers make sure that only ever happens for truly fatal
 // problems, and logs everything else instead of dying.
 process.on('uncaughtException', (err) => {
@@ -63,7 +65,8 @@ function saveScores(data) {
     console.error('Could not save scores.json:', e.message);
   }
 }
-let scoreData = loadScores(); // { scores: { "Alice": 3, "Bob": 1 }, history: [{winner, loser, endedAt}, ...] }
+// { scores: { "Alice": 3, "Bob": 1 }, history: [{winner, players, endedAt}, ...] }
+let scoreData = loadScores();
 
 // ---- Simple static file server for the client page ----
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -104,17 +107,26 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server });
 
 // ---- Game state ----
+// One "room" for the whole server (matches the original 2-player design's
+// scope — this is a LAN party-game server, not a matchmaking service).
+//
+// game.seats: up to MAX_SEATS entries, each either null (empty) or
+//   { ws, name, board, ships, ready, alive }. Seat index is stable for the
+//   life of one game.
+// game.roster: seat indices dealt into the current/most-recent game, fixed
+//   once placement begins (used for ready-checks and history/score records
+//   even if a seat's ws later goes null on a battle-phase disconnect).
+// game.turnOrder: seat indices still "in" the battle (not eliminated),
+//   in current turn-rotation order. game.turnPtr indexes into it.
 function freshGame() {
   return {
-    players: [null, null],
-    names: [null, null],
-    boards: [null, null],
-    ships: [null, null],
-    ready: [false, false],
-    turn: 0,
-    started: false,
-    over: false,
-    placementStarted: false,
+    phase: 'lobby', // 'lobby' | 'placement' | 'battle' | 'over'
+    seats: Array(MAX_SEATS).fill(null),
+    roster: [],
+    turnOrder: [],
+    turnPtr: 0,
+    round: 0,
+    shuffleEachRound: false, // true only when the game started with exactly 3 players
   };
 }
 
@@ -125,8 +137,8 @@ function send(ws, msg) {
 }
 
 function broadcast(msg, exceptIdx = -1) {
-  game.players.forEach((ws, idx) => {
-    if (idx !== exceptIdx) send(ws, msg);
+  game.seats.forEach((seat, idx) => {
+    if (seat && idx !== exceptIdx) send(seat.ws, msg);
   });
 }
 
@@ -134,43 +146,36 @@ function emptyBoard() {
   return Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(null));
 }
 
-function broadcastScoreboard() {
-  const [n1, n2] = game.names;
-  broadcast({
-    type: 'scoreboard',
-    names: game.names,
-    scores: {
-      p1: n1 ? (scoreData.scores[n1] || 0) : 0,
-      p2: n2 ? (scoreData.scores[n2] || 0) : 0,
-    },
-    history: scoreData.history,
-  });
-}
-
-function tryStartPlacement() {
-  const bothConnected = game.players[0] && game.players[0].readyState === game.players[0].OPEN &&
-                         game.players[1] && game.players[1].readyState === game.players[1].OPEN;
-  const bothNamed = !!game.names[0] && !!game.names[1];
-  if (bothConnected && bothNamed && !game.placementStarted) {
-    game.placementStarted = true;
-    game.boards = [emptyBoard(), emptyBoard()];
-    game.ships = [[], []];
-    broadcast({ type: 'startPlacement', shipDefs: SHIP_DEFS, boardSize: BOARD_SIZE, names: game.names });
+function shuffle(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
   }
+  return a;
 }
 
-function resetGame() {
-  const oldPlayers = game.players;
-  const oldNames = game.names;
-  game = freshGame();
-  game.players = oldPlayers;
-  game.names = oldNames;
-  game.boards = [emptyBoard(), emptyBoard()];
-  game.ships = [[], []];
-  game.placementStarted = true;
-  oldPlayers.forEach((ws) => {
-    if (ws) send(ws, { type: 'startPlacement', shipDefs: SHIP_DEFS, boardSize: BOARD_SIZE, names: oldNames });
+function namedSeatIndices() {
+  const result = [];
+  game.seats.forEach((s, i) => { if (s && s.name) result.push(i); });
+  return result;
+}
+
+function broadcastLobby() {
+  const seatsInfo = game.seats.map((s, i) => (s ? { seatIdx: i, name: s.name } : null));
+  broadcast({
+    type: 'lobbyUpdate',
+    seats: seatsInfo,
+    canStart: namedSeatIndices().length >= MIN_TO_START,
+    maxSeats: MAX_SEATS,
   });
+}
+
+function broadcastScoreboard() {
+  const players = game.seats
+    .map((s, i) => (s && s.name) ? { seatIdx: i, name: s.name, score: scoreData.scores[s.name] || 0 } : null)
+    .filter(Boolean);
+  broadcast({ type: 'scoreboard', players, history: scoreData.history });
 }
 
 function validPlacement(board, row, col, size, horizontal) {
@@ -185,197 +190,354 @@ function validPlacement(board, row, col, size, horizontal) {
   return cells;
 }
 
+// Sends startPlacement to exactly the given seats and locks them in as
+// game.roster. Used both for the initial lobby -> placement transition and
+// for a rematch (which skips the lobby and reuses whoever's still connected).
+function beginPlacement(seatIdxs) {
+  seatIdxs.forEach((i) => {
+    const seat = game.seats[i];
+    seat.board = emptyBoard();
+    seat.ships = [];
+    seat.ready = false;
+    seat.alive = true;
+  });
+  game.roster = seatIdxs;
+  game.phase = 'placement';
+  const players = seatIdxs.map((i) => ({ seatIdx: i, name: game.seats[i].name }));
+  seatIdxs.forEach((i) => {
+    send(game.seats[i].ws, { type: 'startPlacement', shipDefs: SHIP_DEFS, boardSize: BOARD_SIZE, players });
+  });
+}
+
+function tryAutoStart() {
+  if (game.phase !== 'lobby') return;
+  const named = namedSeatIndices();
+  if (named.length === MAX_SEATS) beginPlacement(named);
+}
+
+function startNewRound() {
+  game.round += 1;
+  if (game.shuffleEachRound) game.turnOrder = shuffle(game.turnOrder);
+}
+
+function activeSeatIdx() {
+  return game.turnOrder[game.turnPtr];
+}
+
+function announceTurn() {
+  const activeIdx = activeSeatIdx();
+  const activeSeat = game.seats[activeIdx];
+  const targets = game.turnOrder
+    .filter((i) => i !== activeIdx)
+    .map((i) => ({ seatIdx: i, name: game.seats[i].name }));
+  send(activeSeat.ws, { type: 'yourTurn', targets });
+  game.roster.forEach((i) => {
+    if (i !== activeIdx && game.seats[i]) {
+      send(game.seats[i].ws, { type: 'opponentTurn', activeSeat: activeIdx, activeName: activeSeat.name });
+    }
+  });
+}
+
+function beginBattle() {
+  game.phase = 'battle';
+  game.round = 0;
+  game.turnOrder = game.roster.slice();
+  game.shuffleEachRound = (game.roster.length === 3);
+  if (game.shuffleEachRound) game.turnOrder = shuffle(game.turnOrder);
+  game.turnPtr = 0;
+  const players = game.roster.map((i) => ({ seatIdx: i, name: game.seats[i].name }));
+  broadcast({ type: 'gameStart', players });
+  announceTurn();
+}
+
+function advanceTurn() {
+  game.turnPtr = (game.turnPtr + 1) % game.turnOrder.length;
+  if (game.turnPtr === 0) startNewRound();
+}
+
+function recordWin(winnerSeatIdx) {
+  const winnerName = game.seats[winnerSeatIdx].name;
+  const players = game.roster.map((i) => game.seats[i] && game.seats[i].name).filter(Boolean);
+  scoreData.scores[winnerName] = (scoreData.scores[winnerName] || 0) + 1;
+  scoreData.history.unshift({ winner: winnerName, players, endedAt: new Date().toISOString() });
+  scoreData.history = scoreData.history.slice(0, MAX_HISTORY);
+  saveScores(scoreData);
+}
+
+// Removes a seat from the active turn rotation, whether they were sunk or
+// they disconnected. Shared by both callers so the turn-pointer bookkeeping
+// can't drift between the two paths. Returns true if this ended the game.
+function eliminateSeat(seatIdx, reason) {
+  const seat = game.seats[seatIdx];
+  const name = seat ? seat.name : null;
+  if (seat) seat.alive = false;
+
+  const pos = game.turnOrder.indexOf(seatIdx);
+  if (pos !== -1) {
+    game.turnOrder.splice(pos, 1);
+    // If the removed seat was earlier in the order than the current pointer,
+    // shift the pointer left to keep pointing at the same logical player.
+    // If it *was* the current pointer (only possible when the active player
+    // disconnects on their own turn), leave the pointer alone — after the
+    // splice it already lands on the correct next player.
+    if (pos < game.turnPtr) game.turnPtr -= 1;
+  }
+
+  broadcast({ type: 'playerEliminated', seatIdx, name, reason });
+
+  if (game.turnOrder.length <= 1) {
+    game.phase = 'over';
+    const winnerIdx = game.turnOrder[0];
+    if (winnerIdx !== undefined && game.seats[winnerIdx]) {
+      recordWin(winnerIdx);
+      broadcast({ type: 'gameOver', winnerSeat: winnerIdx, winnerName: game.seats[winnerIdx].name });
+      broadcastScoreboard();
+    }
+    return true;
+  }
+
+  // The active-player-disconnected-while-last-in-order case can leave the
+  // pointer pointing past the end of the (now shorter) array.
+  if (game.turnPtr >= game.turnOrder.length) {
+    game.turnPtr = 0;
+    startNewRound();
+  }
+
+  if (reason === 'sunk' && seat && seat.ws) {
+    send(seat.ws, { type: 'spectating', message: 'Your fleet has been sunk! Watch the rest of the battle.' });
+  }
+
+  return false;
+}
+
 wss.on('connection', (ws) => {
-  const bothSlotsFull = game.players[0] && game.players[0].readyState === game.players[0].OPEN &&
-                         game.players[1] && game.players[1].readyState === game.players[1].OPEN;
-  if (bothSlotsFull) {
+  if (game.phase !== 'lobby') {
+    send(ws, { type: 'gameInProgress' });
+    ws.close();
+    return;
+  }
+
+  const idx = game.seats.findIndex((s) => s === null);
+  if (idx === -1) {
     send(ws, { type: 'full' });
     ws.close();
     return;
   }
 
-  // Always 0 or 1: the bothSlotsFull check above already returned if both
-  // slots were taken, so at least one is null or a stale/closed socket.
-  const idx = game.players.findIndex(p => !p || p.readyState !== p.OPEN);
-  game.players[idx] = ws;
-  ws.playerIdx = idx;
+  game.seats[idx] = { ws, name: null, board: null, ships: [], ready: false, alive: true };
+  ws.seatIdx = idx;
 
-  if (!game.boards[idx]) game.boards[idx] = emptyBoard();
-  if (!game.ships[idx]) game.ships[idx] = [];
-
-  send(ws, { type: 'welcome', player: idx + 1 });
-
-  const otherConnected = game.players[idx === 0 ? 1 : 0] && game.players[idx === 0 ? 1 : 0].readyState === ws.OPEN;
-  if (!otherConnected) {
-    send(ws, { type: 'waiting' });
-  }
-  if (game.names[idx]) {
-    // already named from a previous connection in this process lifetime (e.g. quick reconnect)
-    broadcastScoreboard();
-  }
+  send(ws, { type: 'welcome', seatIdx: idx });
+  broadcastLobby();
 
   ws.on('message', (raw) => {
     try {
       handleMessage(ws, raw);
     } catch (err) {
-      // Never let one bad message crash the whole server and disconnect both kids.
+      // Never let one bad message crash the whole server and disconnect everyone.
       console.error('Error handling message:', err);
       send(ws, { type: 'sessionExpired' });
     }
   });
 
   ws.on('close', () => {
-    if (game.players[ws.playerIdx] === ws) {
-      game.players[ws.playerIdx] = null;
-      broadcast({ type: 'opponentDisconnected' }, ws.playerIdx);
-      game = freshGame();
+    const seat = game.seats[ws.seatIdx];
+    if (!seat || seat.ws !== ws) return; // stale socket, already replaced/cleared
+
+    if (game.phase === 'lobby') {
+      game.seats[ws.seatIdx] = null;
+      broadcastLobby();
+    } else if (game.phase === 'placement') {
+      const name = seat.name;
+      game.seats[ws.seatIdx] = null;
+      game.roster = game.roster.filter((i) => i !== ws.seatIdx);
+      broadcast({ type: 'opponentDisconnected', seatIdx: ws.seatIdx, name });
+      if (game.roster.length < MIN_TO_START) {
+        // Not a viable game anymore -- bounce whoever's left back to the
+        // lobby (same Start-game screen, not a hard reload).
+        game.roster.forEach((i) => {
+          const s = game.seats[i];
+          if (s) { s.board = null; s.ships = []; s.ready = false; }
+        });
+        game.phase = 'lobby';
+        game.roster = [];
+        broadcast({ type: 'placementAborted', reason: 'Not enough players left' });
+        broadcastLobby();
+      } else if (game.roster.every((i) => game.seats[i] && game.seats[i].ready)) {
+        // Everyone who's left had already readied up.
+        beginBattle();
+      }
+    } else if (game.phase === 'battle') {
+      // Keep the seat object (name/board) around instead of nulling it, so
+      // history/winner lookups and the eventual gameOver broadcast can still
+      // read their name -- only the dead socket reference goes away.
+      const ended = eliminateSeat(ws.seatIdx, 'disconnected');
+      seat.ws = null;
+      if (!ended) announceTurn();
     }
+    // phase === 'over': nothing to do here; rematch recomputes who's still
+    // connected by checking each seat's live socket state.
   });
 });
 
 function handleMessage(ws, raw) {
-    let msg;
-    try { msg = JSON.parse(raw); } catch { return; }
-    const myIdx = ws.playerIdx;
+  let msg;
+  try { msg = JSON.parse(raw); } catch { return; }
+  const myIdx = ws.seatIdx;
 
-    // If a fresh game/reset happened (e.g. the other player disconnected) since this
-    // socket last got its player slot, it's no longer part of the active game.
-    // Tell the client to reload rather than let a stale message crash anything.
-    if (game.players[myIdx] !== ws) {
-      send(ws, { type: 'sessionExpired' });
+  // If this socket's seat has been cleared or reassigned since it last held
+  // it (room reset, kicked back to lobby, etc.), tell the client to reload
+  // rather than let a stale message touch state it's no longer part of.
+  if (!game.seats[myIdx] || game.seats[myIdx].ws !== ws) {
+    send(ws, { type: 'sessionExpired' });
+    return;
+  }
+  const seat = game.seats[myIdx];
+
+  if (msg.type === 'setName') {
+    if (game.phase !== 'lobby') { send(ws, { type: 'sessionExpired' }); return; }
+    let name = (msg.name || '').toString().trim().slice(0, 20);
+    if (!name) name = 'Player ' + (myIdx + 1);
+    seat.name = name;
+    send(ws, { type: 'nameAccepted', name });
+    broadcastLobby();
+    tryAutoStart();
+    return;
+  }
+
+  if (msg.type === 'startGame') {
+    if (game.phase !== 'lobby') {
+      send(ws, { type: 'startRejected', reason: 'Game already started' });
       return;
     }
-
-    if (msg.type === 'setName') {
-      let name = (msg.name || '').toString().trim().slice(0, 20);
-      if (!name) name = 'Player ' + (myIdx + 1);
-      game.names[myIdx] = name;
-      send(ws, { type: 'nameAccepted', name });
-      broadcastScoreboard();
-      tryStartPlacement();
+    const named = namedSeatIndices();
+    if (named.length < MIN_TO_START) {
+      send(ws, { type: 'startRejected', reason: 'Need at least 2 players to start' });
       return;
     }
+    beginPlacement(named);
+    return;
+  }
 
-    if (msg.type === 'place') {
-      const board = game.boards[myIdx];
-      if (!board) { send(ws, { type: 'sessionExpired' }); return; }
-      // Trust SHIP_DEFS, not the client, for which ship/size this placement is
-      // for — the client can only ever be placing the next unplaced ship.
-      const shipIndex = game.ships[myIdx].length;
-      const shipDef = SHIP_DEFS[shipIndex];
-      if (!shipDef) {
-        send(ws, { type: 'placeRejected', reason: 'All ships already placed' });
-        return;
-      }
-      const row = Number(msg.row);
-      const col = Number(msg.col);
-      if (!Number.isInteger(row) || !Number.isInteger(col)) {
-        send(ws, { type: 'placeRejected', reason: 'Invalid spot' });
-        return;
-      }
-      const cells = validPlacement(board, row, col, shipDef.size, !!msg.horizontal);
-      if (!cells) {
-        send(ws, { type: 'placeRejected', reason: 'Invalid spot' });
-        return;
-      }
-      cells.forEach(([r, c]) => { board[r][c] = shipIndex; });
-      game.ships[myIdx].push({ name: shipDef.name, size: shipDef.size, cells, hits: 0 });
-      send(ws, { type: 'placeAccepted', shipName: shipDef.name, cells });
-      const otherIdx = myIdx === 0 ? 1 : 0;
-      send(game.players[otherIdx], { type: 'opponentProgress', placed: game.ships[myIdx].length, total: SHIP_DEFS.length });
+  if (msg.type === 'place') {
+    if (game.phase !== 'placement' || !seat.board) { send(ws, { type: 'sessionExpired' }); return; }
+    // Trust SHIP_DEFS, not the client, for which ship/size this placement is
+    // for — the client can only ever be placing the next unplaced ship.
+    const shipIndex = seat.ships.length;
+    const shipDef = SHIP_DEFS[shipIndex];
+    if (!shipDef) {
+      send(ws, { type: 'placeRejected', reason: 'All ships already placed' });
+      return;
+    }
+    const row = Number(msg.row);
+    const col = Number(msg.col);
+    if (!Number.isInteger(row) || !Number.isInteger(col)) {
+      send(ws, { type: 'placeRejected', reason: 'Invalid spot' });
+      return;
+    }
+    const cells = validPlacement(seat.board, row, col, shipDef.size, !!msg.horizontal);
+    if (!cells) {
+      send(ws, { type: 'placeRejected', reason: 'Invalid spot' });
+      return;
+    }
+    cells.forEach(([r, c]) => { seat.board[r][c] = shipIndex; });
+    seat.ships.push({ name: shipDef.name, size: shipDef.size, cells, hits: 0 });
+    send(ws, { type: 'placeAccepted', shipName: shipDef.name, cells });
+    broadcast({ type: 'opponentProgress', seatIdx: myIdx, placed: seat.ships.length, total: SHIP_DEFS.length }, myIdx);
+    return;
+  }
+
+  if (msg.type === 'clearPlacement') {
+    if (game.phase !== 'placement') return;
+    seat.board = emptyBoard();
+    seat.ships = [];
+    send(ws, { type: 'placementCleared' });
+    broadcast({ type: 'opponentProgress', seatIdx: myIdx, placed: 0, total: SHIP_DEFS.length }, myIdx);
+    return;
+  }
+
+  if (msg.type === 'ready') {
+    if (game.phase !== 'placement') return;
+    if (!seat.ships || seat.ships.length !== SHIP_DEFS.length) {
+      send(ws, { type: 'placeRejected', reason: 'Place all ships first' });
+      return;
+    }
+    seat.ready = true;
+    broadcast({ type: 'opponentReady', seatIdx: myIdx }, myIdx);
+    if (game.roster.every((i) => game.seats[i] && game.seats[i].ready)) {
+      beginBattle();
+    }
+    return;
+  }
+
+  if (msg.type === 'fire') {
+    if (game.phase !== 'battle') return;
+    if (activeSeatIdx() !== myIdx) return;
+    const targetSeatIdx = Number(msg.targetSeat);
+    if (!Number.isInteger(targetSeatIdx) || targetSeatIdx === myIdx || !game.turnOrder.includes(targetSeatIdx)) return;
+    const targetSeat = game.seats[targetSeatIdx];
+    if (!targetSeat || !targetSeat.board) { send(ws, { type: 'sessionExpired' }); return; }
+    const row = Number(msg.row);
+    const col = Number(msg.col);
+    if (!Number.isInteger(row) || !Number.isInteger(col) ||
+        row < 0 || row >= BOARD_SIZE || col < 0 || col >= BOARD_SIZE) return;
+    const board = targetSeat.board;
+    const cellVal = board[row][col];
+
+    let result = 'miss';
+    let shipName = null;
+    let sunk = false;
+
+    if (cellVal !== null && cellVal !== 'hit' && cellVal !== 'miss') {
+      const ship = targetSeat.ships[cellVal];
+      ship.hits += 1;
+      board[row][col] = 'hit';
+      result = 'hit';
+      shipName = ship.name;
+      if (ship.hits >= ship.size) sunk = true;
+    } else if (cellVal === null) {
+      board[row][col] = 'miss';
+    } else {
+      return; // already hit/missed this cell, ignore
     }
 
-    if (msg.type === 'clearPlacement') {
-      game.boards[myIdx] = emptyBoard();
-      game.ships[myIdx] = [];
-      send(ws, { type: 'placementCleared' });
-      const otherIdx = myIdx === 0 ? 1 : 0;
-      send(game.players[otherIdx], { type: 'opponentProgress', placed: 0, total: SHIP_DEFS.length });
+    broadcast({ type: 'fireResult', by: myIdx, target: targetSeatIdx, row, col, result, shipName, sunk });
+
+    const allSunk = sunk && targetSeat.ships.every((s) => s.hits >= s.size);
+    if (allSunk) {
+      const ended = eliminateSeat(targetSeatIdx, 'sunk');
+      if (ended) return; // gameOver already broadcast inside eliminateSeat
     }
 
-    if (msg.type === 'ready') {
-      if (!game.ships[myIdx] || game.ships[myIdx].length !== SHIP_DEFS.length) {
-        send(ws, { type: 'placeRejected', reason: 'Place all ships first' });
-        return;
-      }
-      game.ready[myIdx] = true;
-      const otherIdx = myIdx === 0 ? 1 : 0;
-      send(game.players[otherIdx], { type: 'opponentReady' });
+    advanceTurn();
+    announceTurn();
+    return;
+  }
 
-      if (game.ready[0] && game.ready[1] && !game.started) {
-        game.started = true;
-        game.turn = 0;
-        broadcast({ type: 'gameStart' });
-        send(game.players[0], { type: 'yourTurn' });
-        send(game.players[1], { type: 'opponentTurn' });
-      }
+  if (msg.type === 'rematch') {
+    if (game.phase !== 'over') return;
+    const survivors = [];
+    game.seats.forEach((s, i) => { if (s && s.ws && s.ws.readyState === s.ws.OPEN) survivors.push(i); });
+    game.seats.forEach((s, i) => { if (s && !survivors.includes(i)) game.seats[i] = null; });
+
+    if (survivors.length < MIN_TO_START) {
+      game.phase = 'lobby';
+      game.roster = [];
+      broadcastLobby();
+      return;
     }
-
-    if (msg.type === 'fire') {
-      if (!game.started || game.over) return;
-      if (game.turn !== myIdx) return;
-      const otherIdx = myIdx === 0 ? 1 : 0;
-      const board = game.boards[otherIdx];
-      if (!board) { send(ws, { type: 'sessionExpired' }); return; }
-      const row = Number(msg.row);
-      const col = Number(msg.col);
-      if (!Number.isInteger(row) || !Number.isInteger(col) ||
-          row < 0 || row >= BOARD_SIZE || col < 0 || col >= BOARD_SIZE) return;
-      const cellVal = board[row][col];
-
-      let result = 'miss';
-      let shipName = null;
-      let sunk = false;
-      let allSunk = false;
-
-      if (cellVal !== null && cellVal !== 'hit' && cellVal !== 'miss') {
-        const ship = game.ships[otherIdx][cellVal];
-        ship.hits += 1;
-        board[row][col] = 'hit';
-        result = 'hit';
-        shipName = ship.name;
-        if (ship.hits >= ship.size) {
-          sunk = true;
-          allSunk = game.ships[otherIdx].every(s => s.hits >= s.size);
-        }
-      } else if (cellVal === null) {
-        board[row][col] = 'miss';
-      } else {
-        return;
-      }
-
-      const resultMsg = { type: 'fireResult', row, col, result, shipName, sunk, by: myIdx + 1 };
-      send(game.players[myIdx], resultMsg);
-      send(game.players[otherIdx], resultMsg);
-
-      if (allSunk) {
-        game.over = true;
-        const winnerName = game.names[myIdx];
-        const loserName = game.names[otherIdx];
-        scoreData.scores[winnerName] = (scoreData.scores[winnerName] || 0) + 1;
-        scoreData.history.unshift({ winner: winnerName, loser: loserName, endedAt: new Date().toISOString() });
-        scoreData.history = scoreData.history.slice(0, MAX_HISTORY);
-        saveScores(scoreData);
-        broadcast({ type: 'gameOver', winner: myIdx + 1, winnerName });
-        broadcastScoreboard();
-      } else {
-        game.turn = otherIdx;
-        send(game.players[myIdx], { type: 'opponentTurn' });
-        send(game.players[otherIdx], { type: 'yourTurn' });
-      }
-    }
-
-    if (msg.type === 'rematch') {
-      game.ready = [false, false];
-      resetGame();
-    }
+    survivors.forEach((i) => { game.seats[i].ready = false; game.seats[i].alive = true; });
+    beginPlacement(survivors);
+    return;
+  }
 }
 
 server.listen(PORT, () => {
   console.log('');
   console.log('  Battleship server running!');
   console.log('  On THIS machine, open: http://localhost:' + PORT);
-  console.log('  On the OTHER PC, open: http://<this-host\'s-LAN-IP>:' + PORT);
+  console.log('  On OTHER PCs, open: http://<this-host\'s-LAN-IP>:' + PORT);
+  console.log('  Up to ' + MAX_SEATS + ' players per game.');
   console.log('  Scoreboard file: ' + SCORES_FILE + ' (persists across restarts)');
   console.log('');
 });

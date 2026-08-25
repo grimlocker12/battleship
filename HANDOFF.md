@@ -12,11 +12,11 @@ re-derive from scratch.
 
 ## What this is
 
-A 2-player Battleship game. One machine runs `server.js` (Node + the `ws`
+A 2-4 player Battleship game. One machine runs `server.js` (Node + the `ws`
 package), which serves the client (`public/index.html`, a single-file
 vanilla JS/HTML/CSS app — no build step, no framework) and relays game state
-over WebSockets. Each kid opens a browser on their own PC and connects to
-the host machine's LAN IP on port 3000.
+over WebSockets. Each player opens a browser on their own device and
+connects to the host machine's LAN IP on port 3000.
 
 ## How it evolved (in order)
 
@@ -187,6 +187,93 @@ the host machine's LAN IP on port 3000.
    server" approach described below in Testing approach) — not just read
    over statically.
 
+8. **2-4 player support.** Andreas wanted to "spice up" family game night:
+   more than 2 players, choosing who to shoot at each turn, and a
+   randomized turn order specifically for 3-player games. This was a
+   near-total rewrite of the session/game state in both files — the old
+   model was hardcoded around exactly 2 players (fixed 2-element arrays
+   for `players`/`names`/`boards`/`ships`/`ready`, `otherIdx = myIdx===0?1:0`
+   turn logic). Planned via `EnterPlanMode` given the scope; the approved
+   plan is a useful reference for the design rationale beyond what's below.
+
+   **Server (`server.js`) — new state model:** a `seats` array (length 4,
+   stable index for the life of one game) replaces the parallel arrays;
+   `game.phase` is `'lobby' | 'placement' | 'battle' | 'over'`;
+   `game.roster` is the seat indices dealt into the current game;
+   `game.turnOrder`/`turnPtr` drive whose turn it is. Key behaviors:
+   - **Flexible lobby.** Up to 4 seats; auto-starts the instant all 4 are
+     named, otherwise any named seat can send `startGame` once ≥2 are
+     named. This applies uniformly *including 2-player games* — there's no
+     special case that skips the lobby at 2, so even a 2-player game now
+     sees a brief seat-list-and-Start-button screen before placement
+     (a deliberate, explicit trade-off Andreas signed off on, in exchange
+     for one consistent flow at every player count).
+   - **Turn rotation + 3p reshuffle.** `turnOrder` is fixed seat-ascending
+     for 2p/4p; for a game that *started* with exactly 3 players,
+     `shuffleEachRound` is set true and the order is reshuffled at the
+     start of every round (continues reshuffling even if attrition drops
+     it to 2 alive players later — a deliberate, harmless simplification
+     rather than a special case). See the `eliminateSeat()` function's
+     comments for the turn-pointer bookkeeping when a seat is removed
+     mid-rotation — it's shared between the "sunk" and "disconnected"
+     removal paths specifically so they can't drift apart.
+   - **Elimination = spectator, not game-end.** A sunk player's socket
+     stays in `seats[]` (so `broadcast()` keeps reaching them for free) and
+     they receive a `spectating` message, watching live until the game
+     ends. The one exception: if a player is eliminated by the *same event*
+     that ends the game (the classic 2-player case, or the second-to-last
+     elimination in a larger game), they go straight to `gameOver` with no
+     `spectating` message in between — there's nothing left to watch.
+   - **Disconnect = elimination, unified across every player count,
+     including 2p.** This intentionally *replaces* the "wipe the whole
+     game on any disconnect" design from entry 3 above, which was
+     explicitly a 2-player-only crash-safety choice. Andreas was asked
+     directly whether 2p should keep that old special-cased behavior or
+     unify with the new rule, and chose to unify — a disconnecting opponent
+     now just hands the remaining player(s) the win, at every player count.
+     Lobby-phase and placement-phase disconnects are handled differently
+     (free the seat / bounce survivors back to the lobby if it drops below
+     2) — see the phase-by-phase branches in the `ws.on('close', ...)`
+     handler.
+   - **Scoreboard/history generalized to N players.** `scoreData.history`
+     entries changed from `{winner, loser, endedAt}` to
+     `{winner, players: [...], endedAt}` since "loser" isn't well-defined
+     for 3-4 players — non-breaking, since the client's
+     `updateMatchHistory()` only ever reads `.winner`.
+
+   **Client (`public/index.html`):** a new `#lobbyPhase` screen (seat list +
+   Start button); `mySeatIdx` (0-based) replaces `myPlayer` and a `roster`
+   map replaces the fixed 2-name array everywhere. The battle UI renders
+   **one enemy board per alive opponent** rather than a single fixed enemy
+   board — for a 2-player game this naturally produces exactly one board,
+   so the interaction is pixel-for-pixel identical to before (no visible
+   "target picker" widget exists as a separate concept; clicking a specific
+   opponent's board *is* the target choice). Eliminated opponents' boards
+   stay visible but permanently disabled with an "ELIMINATED" label rather
+   than being removed, which is what a spectator (or the eliminated player
+   themselves) sees for the rest of the game.
+
+   **Testing:** a disposable scripted-`ws`-client test harness (matching
+   the project's established approach, see below) with 21 assertions
+   across lobby/auto-start, fixed 2p/4p rotation, the 3p reshuffle
+   (asserted across multiple rounds, not just once), elimination →
+   spectator → correct eventual winner, every disconnect phase/variant
+   including the newly-unified 2p case, and the scoreboard/history shape —
+   all passing before moving to real browser verification. Then two full
+   real games via the browser tool: a 3-player game start-to-finish
+   (including watching the elimination → spectator transition and the
+   distinct "thanks for watching" vs. immediate-loss wording, then a
+   rematch), and a 4-player game through placement and battle, specifically
+   checked at 375px and 320px viewport widths (four boards on screen at
+   once was flagged as an open layout risk in the plan; the existing
+   `clamp()`/flex-wrap responsive CSS from entry 7 handled it fine with no
+   changes needed).
+
+   Same session, separately: removed the screen-shake-on-hit effect
+   (`shakeScreen()`/`#app.shake`/the `shake` keyframes, added in the
+   unattributed claude.ai session described in entry 5) — Andreas's kids
+   found it annoying. Pure removal, no replacement effect requested.
+
 ## Testing approach used so far
 
 There's no permanent test suite in this repo (kept it minimal for a family
@@ -214,6 +301,6 @@ just the code that implements it.
   makes cheating-by-inspecting-devtools not a concern for two kids playing
   each other, and avoids a whole class of sync bugs.
 - **Scores keyed by name, not by connection/session.** Simple and fits the
-  "two known kids, same names every time" use case. Not designed for
-  arbitrary/anonymous multiplayer — if this ever needs to support that,
-  the scoreboard model would need rethinking.
+  "small group of known players, same names every time" use case. Not
+  designed for arbitrary/anonymous multiplayer — if this ever needs to
+  support that, the scoreboard model would need rethinking.

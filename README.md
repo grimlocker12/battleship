@@ -1,7 +1,7 @@
 # Battleship — Local Network Multiplayer
 
-A simple 2-player Battleship game your kids can play from two separate PCs
-on the same home WiFi/network.
+A simple 2-4 player Battleship game your family can play from separate
+devices on the same home WiFi/network.
 
 > **Using Claude Code (or another AI coding tool) on this project?** Read
 > **[HANDOFF.md](HANDOFF.md)** first — it covers the project history,
@@ -63,32 +63,43 @@ Option A instead.
    - Mac: System Settings → Wi-Fi/Network → the IP is shown there, or run
      `ifconfig` / `ip addr` in Terminal.
 3. **On the host PC's own browser**, go to `http://localhost:3000`.
-4. **On the other kid's PC**, open a browser and go to
+4. **On each other device**, open a browser and go to
    `http://192.168.1.23:3000` (using the actual IP from step 2, port `3000`).
-5. Whoever connects first is Player 1, the second is Player 2. Once both
-   are connected, ship placement starts automatically.
+5. Once at least 2 players have joined and named themselves, anyone can
+   click **Start Game** — or wait for up to 4 to join, which starts
+   automatically the moment the 4th player is in.
 
-Both PCs need to be on the **same WiFi/network** for this to work. If the
-second PC can't connect, it's almost always a firewall prompt on the host
+Every device needs to be on the **same WiFi/network** for this to work. If
+a device can't connect, it's almost always a firewall prompt on the host
 PC — click "Allow" if Windows/Mac asks whether Node.js can accept network
 connections.
 
 ## How to play
 
-1. **Enter your name:** Each kid types their name on their own PC first.
-   This is remembered by their browser, so next time they play it's
+1. **Enter your name:** Each player types their name on their own device
+   first. This is remembered by their browser, so next time they play it's
    already filled in.
-2. **Placement:** Each player places 5 ships (Carrier, Battleship, Cruiser,
+2. **Lobby:** Once you've named yourself, you'll see who else has joined.
+   Click **Start Game** once at least 2 are in, or wait for more (up to 4)
+   to join first.
+3. **Placement:** Each player places 5 ships (Carrier, Battleship, Cruiser,
    Submarine, Destroyer) by clicking a starting cell on their own grid.
    Use the "Rotate" button to switch between horizontal/vertical before
    placing. Or just hit "Random placement" to skip straight to battle.
-3. Click **Ready** once all 5 ships are placed.
-4. **Battle:** Players take turns clicking cells on the enemy grid to fire.
-   Hits, misses, and sunk ships are shown live to both players, with sound
-   effects and explosion/splash animations.
-5. First to sink all 5 of the opponent's ships wins — confetti and a
-   victory jingle included. Hit **Play again** for a rematch — no need to
-   restart the server, and names/scores carry over automatically.
+   Click **Ready** once all 5 ships are placed.
+4. **Battle:** On your turn, pick which opponent to fire at (in a 2-player
+   game there's only one board to click, exactly like before; in a 3-4
+   player game you'll see one board per opponent — click any of them).
+   Hits, misses, and sunk ships are shown live to everyone, with sound
+   effects and explosion/splash animations. In a 3-player game, the turn
+   order is reshuffled every round to keep things unpredictable; in 2- and
+   4-player games turns rotate in a fixed order.
+5. **Elimination:** Losing your whole fleet doesn't end the game for
+   everyone else in a 3-4 player game — you switch to spectating and watch
+   the rest of the battle live. Last player standing wins — confetti and a
+   victory jingle for the winner. Hit **Play again** for a rematch with the
+   same group — no need to restart the server, and names/scores carry over
+   automatically.
 
 ## Scoreboard & names
 
@@ -119,16 +130,17 @@ connections.
 ## Notes
 
 - This only works on your home network — it's not exposed to the internet,
-  which is exactly what you want for two kids playing each other.
+  which is exactly what you want for family members playing each other.
 - **Option B only:** to stop the server, click into the terminal window and
   press `Ctrl+C`. (On the TrueNAS setup, use `service battleship stop`
   instead — see the deploy guide.)
-- Only two players can be connected at once; a third browser tab will just
-  see "Game is full."
+- Up to 4 players can be connected at once; a 5th browser tab will see
+  "Game is full" (or "already in progress" if a game's mid-way through).
 - If you ever want to wipe the scoreboard clean, just delete `scores.json`
   (next to `server.js`) and restart the server — it'll start a fresh one
   automatically.
-- If one kid's browser refreshes, closes, or briefly loses WiFi mid-game,
-  the other kid will see a "Reload page" prompt — that's expected, since a
-  2-player game can't continue without both players. Just have both kids
-  reload and reconnect to start a fresh game.
+- If someone's browser refreshes, closes, or briefly loses WiFi mid-game,
+  they're simply eliminated (or, in a 2-player game, the remaining player
+  wins) — everyone else's game continues uninterrupted. The player who
+  dropped just needs to reload the page to rejoin the lobby for the next
+  game.

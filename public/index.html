@@ -99,6 +99,8 @@
     display: flex;
     gap: 10px;
     align-items: center;
+    flex-wrap: wrap;
+    justify-content: center;
     background: rgba(0,0,0,0.25);
     border: 1px solid rgba(255,255,255,0.12);
     border-radius: 14px;
@@ -170,6 +172,42 @@
   }
   #nameInput:focus { outline: none; border-color: var(--gold); }
 
+  /* Lobby */
+  #lobbyPhase {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 16px;
+    padding: 30px 36px;
+    margin-top: 20px;
+    text-align: center;
+  }
+  #lobbyPhase h2 { margin: 0 0 4px; font-size: 1.2rem; }
+  .lobby-seats { display: flex; flex-direction: column; gap: 8px; margin: 6px 0; min-width: 220px; }
+  .lobby-seat {
+    padding: 8px 16px;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.1);
+  }
+  .lobby-seat.filled { background: rgba(79,168,216,0.18); border-color: rgba(79,168,216,0.4); font-weight: bold; }
+  .lobby-seat.empty { opacity: 0.55; font-style: italic; }
+
+  /* Spectator banner */
+  #spectatorBanner {
+    background: rgba(242,177,52,0.15);
+    border: 1px solid rgba(242,177,52,0.4);
+    border-radius: 10px;
+    padding: 10px 18px;
+    margin-bottom: 14px;
+    text-align: center;
+    font-size: 0.95rem;
+    max-width: 520px;
+  }
+
   /* Placement controls */
   #placementControls {
     display: flex;
@@ -203,6 +241,7 @@
     text-align: center;
     margin: -6px 0 14px;
     min-height: 1.2em;
+    line-height: 1.5;
   }
 
   button {
@@ -231,6 +270,8 @@
   .board-wrap { text-align: center; }
   .board-label { margin-bottom: 8px; font-size: 1rem; color: var(--sea-light); letter-spacing: 1px; }
   .board-wrap.active-turn .board-label { color: var(--gold-bright); text-shadow: 0 0 8px rgba(242,177,52,0.7); }
+  .board-wrap.eliminated .grid { opacity: 0.35; filter: grayscale(0.6); }
+  .board-wrap.eliminated .board-label::after { content: ' — ELIMINATED'; color: var(--hit); font-weight: bold; }
   .grid {
     display: grid;
     grid-template-columns: repeat(10, var(--cell));
@@ -379,15 +420,6 @@
     100% { transform: translate(-50%, -240%) scale(1); opacity: 0; }
   }
 
-  /* ---- Screen shake on hits ---- */
-  @keyframes shake {
-    10%, 90% { transform: translateX(-2px); }
-    20%, 80% { transform: translateX(4px); }
-    30%, 50%, 70% { transform: translateX(-7px); }
-    40%, 60% { transform: translateX(7px); }
-  }
-  #app.shake { animation: shake 0.4s cubic-bezier(.36,.07,.19,.97) both; }
-
   /* ---- Decorative animated waves along the bottom, purely CSS (no assets) ---- */
   #waveFooter {
     position: fixed;
@@ -430,7 +462,7 @@
   <div id="waveFooter"><div class="wave"></div><div class="wave wave2"></div></div>
   <div id="app">
     <h1>⚓ BATTLESHIP</h1>
-    <div class="subtitle">Local network multiplayer</div>
+    <div class="subtitle">Local network multiplayer — 2 to 4 players</div>
     <div id="status">Connecting...</div>
     <div id="scoreboard" class="hidden"></div>
     <div id="matchHistory" class="hidden"></div>
@@ -444,6 +476,12 @@
       <h2>What's your name, Captain?</h2>
       <input id="nameInput" type="text" maxlength="20" placeholder="Enter your name" />
       <button id="nameSubmitBtn">Set sail!</button>
+    </div>
+
+    <div id="lobbyPhase" class="hidden">
+      <h2>Waiting for captains...</h2>
+      <div class="lobby-seats" id="lobbySeats"></div>
+      <button id="startGameBtn" disabled>Start Game</button>
     </div>
 
     <div id="placementPhase" class="hidden">
@@ -465,12 +503,9 @@
 
     <div id="battlePhase" class="hidden">
       <div id="winBanner" class="hidden"></div>
+      <div id="spectatorBanner" class="hidden"></div>
       <div class="boards" id="battleBoards">
-        <div class="board-wrap" id="enemyBoardWrap">
-          <div class="board-label">Enemy waters — click to fire</div>
-          <div class="grid" id="enemyGrid"></div>
-        </div>
-        <div class="board-wrap">
+        <div class="board-wrap" id="myBoardWrap">
           <div class="board-label">Your fleet</div>
           <div class="grid disabled" id="myGrid"></div>
         </div>
@@ -486,7 +521,8 @@
 <script>
 const BOARD_SIZE = 10;
 let ws;
-let myPlayer = null;
+let mySeatIdx = null;
+let hasNamedSelf = false;
 let horizontal = true;
 let shipDefs = [];
 let currentShipIdx = 0;
@@ -494,7 +530,14 @@ let placedShips = [];
 let myBoardOwnership = [];
 let placementDone = false;
 let myName = '';
-let names = [null, null];
+let roster = {};             // seatIdx -> name, for the current/most-recent game
+let currentPlayers = [];     // roster as an array, as last sent by the server
+let currentValidTargets = []; // seatIdx list of who's legal to fire at right now
+let spectatorMode = false;
+let opponentProgressBySeat = {}; // seatIdx -> { placed, total }
+let eliminatedSeats = {};        // seatIdx -> true
+let enemyBoardWraps = {};        // seatIdx -> wrap element
+let enemyGrids = {};             // seatIdx -> grid element
 
 // Whimsical, not literal — there's no dedicated submarine emoji in Unicode.
 const SHIP_EMOJI = {
@@ -615,7 +658,6 @@ function launchConfetti() {
 
 // ---------- Hit/miss/sunk fun effects: particle bursts + floating text ----------
 const effectsLayer = document.getElementById('effectsLayer');
-const appEl = document.getElementById('app');
 
 function cellCenter(cellEl) {
   const r = cellEl.getBoundingClientRect();
@@ -649,12 +691,6 @@ function spawnFloatyText(x, y, text, color) {
   setTimeout(() => el.remove(), 1150);
 }
 
-function shakeScreen() {
-  appEl.classList.remove('shake');
-  void appEl.offsetWidth; // restart the animation even if it's already mid-shake
-  appEl.classList.add('shake');
-}
-
 const statusEl = document.getElementById('status');
 const reconnectBanner = document.getElementById('reconnectBanner');
 const reconnectMessage = document.getElementById('reconnectMessage');
@@ -664,13 +700,17 @@ const nameInput = document.getElementById('nameInput');
 const nameSubmitBtn = document.getElementById('nameSubmitBtn');
 const scoreboardEl = document.getElementById('scoreboard');
 const matchHistoryEl = document.getElementById('matchHistory');
-const opponentProgressEl = document.getElementById('opponentProgress');
+const lobbyPhase = document.getElementById('lobbyPhase');
+const lobbySeatsEl = document.getElementById('lobbySeats');
+const startGameBtn = document.getElementById('startGameBtn');
 const placementPhase = document.getElementById('placementPhase');
 const battlePhase = document.getElementById('battlePhase');
 const placementGrid = document.getElementById('placementGrid');
-const enemyGrid = document.getElementById('enemyGrid');
 const myGrid = document.getElementById('myGrid');
-const enemyBoardWrap = document.getElementById('enemyBoardWrap');
+const myBoardWrap = document.getElementById('myBoardWrap');
+const battleBoardsEl = document.getElementById('battleBoards');
+const opponentProgressEl = document.getElementById('opponentProgress');
+const spectatorBannerEl = document.getElementById('spectatorBanner');
 const shipListEl = document.getElementById('shipList');
 const readyBtn = document.getElementById('readyBtn');
 const rotateBtn = document.getElementById('rotateBtn');
@@ -690,10 +730,12 @@ function connect() {
 reloadBtn.addEventListener('click', () => location.reload());
 
 // Locks the whole game UI and shows a "Reload page" button. Used whenever this
-// browser's session is no longer valid on the server (opponent left, server
-// restarted, etc.) so a stray click can't crash anything — it just prompts a reload.
+// browser's session is no longer valid on the server (server restarted, this
+// tab got left behind, etc.) so a stray click can't crash anything — it just
+// prompts a reload.
 function lockGame(message) {
   namePhase.classList.add('hidden');
+  lobbyPhase.classList.add('hidden');
   placementPhase.classList.add('hidden');
   battlePhase.classList.add('hidden');
   reconnectMessage.textContent = message;
@@ -704,36 +746,43 @@ function lockGame(message) {
 function handleMessage(msg) {
   switch (msg.type) {
     case 'welcome':
-      myPlayer = msg.player;
+      mySeatIdx = msg.seatIdx;
       showNamePhase();
       break;
-    case 'waiting':
-      statusEl.textContent = 'Waiting for the other player to connect...';
-      break;
     case 'full':
-      statusEl.textContent = 'Game is full. Only two players can play at once.';
+      statusEl.textContent = 'Game is full (4 players already). Try again once it finishes.';
+      break;
+    case 'gameInProgress':
+      statusEl.textContent = 'A game is already in progress. Try again once it finishes.';
       break;
     case 'nameAccepted':
       myName = msg.name;
-      statusEl.textContent = 'Welcome, Captain ' + myName + '! Waiting for the other captain...';
+      hasNamedSelf = true;
+      statusEl.textContent = 'Welcome, Captain ' + myName + '!';
+      break;
+    case 'lobbyUpdate':
+      renderLobby(msg);
+      break;
+    case 'startRejected':
+      statusEl.textContent = msg.reason;
+      break;
+    case 'placementAborted':
+      placementPhase.classList.add('hidden');
+      statusEl.textContent = msg.reason + ' Back to the lobby.';
       break;
     case 'scoreboard':
-      names = msg.names;
-      updateScoreboard(msg.scores);
+      updateScoreboard(msg.players);
       updateMatchHistory(msg.history);
       break;
     case 'startPlacement':
       shipDefs = msg.shipDefs;
-      names = msg.names || names;
-      startPlacementPhase();
+      currentPlayers = msg.players;
+      roster = {};
+      msg.players.forEach((p) => { roster[p.seatIdx] = p.name; });
+      startPlacementPhase(msg.players);
       break;
     case 'placeAccepted':
       onPlaceAccepted(msg);
-      break;
-    case 'opponentProgress':
-      opponentProgressEl.textContent = msg.placed === 0
-        ? "Opponent hasn't placed any ships yet."
-        : 'Opponent has placed ' + msg.placed + '/' + msg.total + ' ships.';
       break;
     case 'placeRejected':
       statusEl.textContent = msg.reason;
@@ -741,36 +790,49 @@ function handleMessage(msg) {
     case 'placementCleared':
       resetPlacementUI();
       break;
+    case 'opponentProgress':
+      opponentProgressBySeat[msg.seatIdx] = { placed: msg.placed, total: msg.total };
+      renderOpponentProgress();
+      break;
     case 'opponentReady':
-      if (!placementDone) statusEl.textContent = 'Opponent is ready! Finish placing your ships.';
+      if (!placementDone) statusEl.textContent = (roster[msg.seatIdx] || 'Opponent') + ' is ready!';
+      break;
+    case 'opponentDisconnected':
+      delete opponentProgressBySeat[msg.seatIdx];
+      renderOpponentProgress();
+      statusEl.textContent = (msg.name || 'A player') + ' disconnected.';
       break;
     case 'gameStart':
-      startBattlePhase();
+      currentPlayers = msg.players;
+      roster = {};
+      msg.players.forEach((p) => { roster[p.seatIdx] = p.name; });
+      startBattlePhase(msg.players);
       break;
     case 'yourTurn':
+      currentValidTargets = msg.targets.map((t) => t.seatIdx);
       statusEl.textContent = 'Your turn — fire away!';
-      enemyGrid.classList.remove('disabled');
-      enemyGrid.classList.add('my-turn-glow');
-      enemyBoardWrap.classList.add('active-turn');
+      updateBoardEnabledStates();
       SFX.yourTurn();
       break;
     case 'opponentTurn':
-      statusEl.textContent = "Opponent's turn... waiting.";
-      enemyGrid.classList.add('disabled');
-      enemyGrid.classList.remove('my-turn-glow');
-      enemyBoardWrap.classList.remove('active-turn');
+      currentValidTargets = [];
+      statusEl.textContent = (msg.activeName || 'Opponent') + "'s turn... waiting.";
+      updateBoardEnabledStates();
       break;
     case 'fireResult':
       applyFireResult(msg);
       break;
+    case 'playerEliminated':
+      markEliminated(msg.seatIdx, msg.reason);
+      break;
+    case 'spectating':
+      enterSpectatorMode(msg.message);
+      break;
     case 'gameOver':
       onGameOver(msg);
       break;
-    case 'opponentDisconnected':
-      lockGame('The other captain disconnected. Reload this page to start a new game.');
-      break;
     case 'sessionExpired':
-      lockGame('This game session ended (probably because the other player reloaded or reconnected). Reload this page to rejoin.');
+      lockGame('This game session ended. Reload this page to rejoin.');
       break;
   }
 }
@@ -780,7 +842,7 @@ function showNamePhase() {
   const saved = localStorage.getItem('battleship_name');
   if (saved) nameInput.value = saved;
   namePhase.classList.remove('hidden');
-  statusEl.textContent = 'You are Player ' + myPlayer + '. Enter your name to continue.';
+  statusEl.textContent = 'Enter your name to continue, Captain.';
   nameInput.focus();
 }
 
@@ -795,18 +857,43 @@ function submitName() {
 nameSubmitBtn.addEventListener('click', submitName);
 nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitName(); });
 
+// ---------- Lobby ----------
+function renderLobby(msg) {
+  if (!hasNamedSelf) return; // still on our own name-entry screen
+  namePhase.classList.add('hidden');
+  placementPhase.classList.add('hidden');
+  battlePhase.classList.add('hidden');
+  lobbyPhase.classList.remove('hidden');
+
+  lobbySeatsEl.innerHTML = '';
+  for (let i = 0; i < msg.maxSeats; i++) {
+    const seat = msg.seats[i];
+    const div = document.createElement('div');
+    div.className = 'lobby-seat ' + (seat ? 'filled' : 'empty');
+    let label = seat ? (seat.name || 'Choosing a name...') : 'Waiting for a player...';
+    if (seat && i === mySeatIdx) label += ' (you)';
+    div.textContent = label;
+    lobbySeatsEl.appendChild(div);
+  }
+  startGameBtn.disabled = !msg.canStart;
+  statusEl.textContent = msg.canStart
+    ? 'Ready when you are — click Start Game, or wait for more players to join.'
+    : 'Waiting for at least one more player to join and name themselves...';
+}
+
+startGameBtn.addEventListener('click', () => {
+  SFX.click();
+  ws.send(JSON.stringify({ type: 'startGame' }));
+});
+
 // ---------- Scoreboard ----------
-function updateScoreboard(scores) {
-  if (!names[0] && !names[1]) { scoreboardEl.classList.add('hidden'); return; }
-  const n1 = names[0] || '(waiting)';
-  const n2 = names[1] || '(waiting)';
-  const isP1You = myPlayer === 1;
-  scoreboardEl.innerHTML =
-    '<span class="score-name ' + (isP1You ? 'score-you' : '') + '">' + escapeHtml(n1) +
-    '<span class="score-count">' + (scores.p1 || 0) + '</span></span>' +
-    '<span class="score-vs">vs</span>' +
-    '<span class="score-name ' + (!isP1You ? 'score-you' : '') + '">' + escapeHtml(n2) +
-    '<span class="score-count">' + (scores.p2 || 0) + '</span></span>';
+function updateScoreboard(players) {
+  if (!players || !players.length) { scoreboardEl.classList.add('hidden'); return; }
+  scoreboardEl.innerHTML = players.map((p) => {
+    const isYou = p.seatIdx === mySeatIdx;
+    return '<span class="score-name ' + (isYou ? 'score-you' : '') + '">' + escapeHtml(p.name) +
+      '<span class="score-count">' + (p.score || 0) + '</span></span>';
+  }).join('<span class="score-vs">vs</span>');
   scoreboardEl.classList.remove('hidden');
 }
 function escapeHtml(s) {
@@ -819,27 +906,47 @@ function escapeHtml(s) {
 function updateMatchHistory(history) {
   if (!history || !history.length) { matchHistoryEl.classList.add('hidden'); return; }
   const chips = history.slice(0, 5)
-    .map(h => '<span class="hist-chip">' + escapeHtml(h.winner) + '</span>')
+    .map((h) => '<span class="hist-chip">' + escapeHtml(h.winner) + '</span>')
     .join('<span class="hist-sep">·</span>');
   matchHistoryEl.innerHTML = '<span class="hist-label">Recent wins:</span>' + chips;
   matchHistoryEl.classList.remove('hidden');
 }
 
 // ---------- Placement phase ----------
-function startPlacementPhase() {
+function startPlacementPhase(players) {
   placementDone = false;
   currentShipIdx = 0;
   placedShips = [];
-  myBoardOwnership = Array.from({length: BOARD_SIZE}, () => Array(BOARD_SIZE).fill(false));
+  myBoardOwnership = Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(false));
+  spectatorMode = false;
+  eliminatedSeats = {};
+  opponentProgressBySeat = {};
+  players.forEach((p) => {
+    if (p.seatIdx !== mySeatIdx) opponentProgressBySeat[p.seatIdx] = { placed: 0, total: shipDefs.length };
+  });
+
+  lobbyPhase.classList.add('hidden');
   placementPhase.classList.remove('hidden');
   battlePhase.classList.add('hidden');
   winBanner.classList.add('hidden');
+  spectatorBannerEl.classList.add('hidden');
   rematchBtn.classList.add('hidden');
   statusEl.textContent = 'Place your ships. Click a starting cell for the highlighted ship.';
-  opponentProgressEl.textContent = "Opponent hasn't placed any ships yet.";
   buildShipList();
+  renderOpponentProgress();
   buildGrid(placementGrid, BOARD_SIZE, onPlacementCellClick, onPlacementCellHover);
   readyBtn.disabled = true;
+}
+
+function renderOpponentProgress() {
+  const seatIdxs = Object.keys(opponentProgressBySeat);
+  if (!seatIdxs.length) { opponentProgressEl.innerHTML = ''; return; }
+  const lines = seatIdxs.map((seatIdx) => {
+    const info = opponentProgressBySeat[seatIdx];
+    const name = roster[seatIdx] || 'Opponent';
+    return escapeHtml(name) + ': ' + info.placed + '/' + info.total + ' ships placed.';
+  });
+  opponentProgressEl.innerHTML = lines.join('<br>');
 }
 
 function buildShipList() {
@@ -923,7 +1030,7 @@ function onPlaceAccepted(msg) {
 }
 
 function resetPlacementUI() {
-  startPlacementPhase();
+  startPlacementPhase(currentPlayers);
 }
 
 rotateBtn.addEventListener('click', () => {
@@ -976,14 +1083,39 @@ readyBtn.addEventListener('click', () => {
   SFX.click();
   ws.send(JSON.stringify({ type: 'ready' }));
   readyBtn.disabled = true;
-  statusEl.textContent = 'Waiting for opponent to finish placing ships...';
+  statusEl.textContent = 'Waiting for everyone else to finish placing ships...';
 });
 
 // ---------- Battle phase ----------
-function startBattlePhase() {
+function startBattlePhase(players) {
   placementPhase.classList.add('hidden');
   battlePhase.classList.remove('hidden');
-  buildGrid(enemyGrid, BOARD_SIZE, onFireClick, null);
+  spectatorMode = false;
+  spectatorBannerEl.classList.add('hidden');
+  eliminatedSeats = {};
+  enemyBoardWraps = {};
+  enemyGrids = {};
+
+  // Clear out any enemy boards left over from a previous game (rematch).
+  [...battleBoardsEl.querySelectorAll('.enemy-board-wrap')].forEach((el) => el.remove());
+
+  const opponents = players.filter((p) => p.seatIdx !== mySeatIdx);
+  opponents.forEach((p) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'board-wrap enemy-board-wrap';
+    const label = document.createElement('div');
+    label.className = 'board-label';
+    label.textContent = p.name + ' — click to fire';
+    wrap.appendChild(label);
+    const grid = document.createElement('div');
+    grid.className = 'grid disabled';
+    wrap.appendChild(grid);
+    battleBoardsEl.insertBefore(wrap, myBoardWrap);
+    buildGrid(grid, BOARD_SIZE, (r, c) => onFireClick(p.seatIdx, r, c), null);
+    enemyBoardWraps[p.seatIdx] = wrap;
+    enemyGrids[p.seatIdx] = grid;
+  });
+
   buildGrid(myGrid, BOARD_SIZE, null, null);
   placedShips.forEach(ship => {
     const emoji = SHIP_EMOJI[ship.name] || '';
@@ -993,26 +1125,41 @@ function startBattlePhase() {
       cell.textContent = emoji;
     });
   });
-  enemyGrid.classList.add('disabled');
 }
 
-function onFireClick(row, col) {
-  if (enemyGrid.classList.contains('disabled')) return;
-  const cell = getCell(enemyGrid, row, col);
+function updateBoardEnabledStates() {
+  Object.keys(enemyGrids).forEach((seatIdxStr) => {
+    const seatIdx = Number(seatIdxStr);
+    const grid = enemyGrids[seatIdx];
+    const wrap = enemyBoardWraps[seatIdx];
+    const isEliminated = !!eliminatedSeats[seatIdx];
+    const isValidTarget = !spectatorMode && !isEliminated && currentValidTargets.indexOf(seatIdx) !== -1;
+    grid.classList.toggle('disabled', !isValidTarget);
+    grid.classList.toggle('my-turn-glow', isValidTarget);
+    if (wrap) wrap.classList.toggle('active-turn', isValidTarget);
+  });
+}
+
+function onFireClick(targetSeatIdx, row, col) {
+  if (spectatorMode) return;
+  if (currentValidTargets.indexOf(targetSeatIdx) === -1) return;
+  const grid = enemyGrids[targetSeatIdx];
+  if (!grid) return;
+  const cell = getCell(grid, row, col);
   if (cell.classList.contains('hit') || cell.classList.contains('miss') || cell.classList.contains('sunk-cell')) return;
   SFX.fire();
-  ws.send(JSON.stringify({ type: 'fire', row, col }));
+  ws.send(JSON.stringify({ type: 'fire', targetSeat: targetSeatIdx, row, col }));
 }
 
 function applyFireResult(msg) {
-  const targetGrid = (msg.by === myPlayer) ? enemyGrid : myGrid;
+  const targetGrid = (msg.target === mySeatIdx) ? myGrid : enemyGrids[msg.target];
+  if (!targetGrid) return;
   const cell = getCell(targetGrid, msg.row, msg.col);
   const { x, y } = cellCenter(cell);
   if (msg.result === 'hit') {
     cell.classList.add(msg.sunk ? 'sunk-cell' : 'hit');
     cell.textContent = msg.sunk ? '☠' : '✸';
     spawnParticles(x, y, '💥', msg.sunk ? 12 : 6);
-    shakeScreen();
     if (msg.sunk) {
       spawnFloatyText(x, y, 'SUNK!', '#ff8a4d');
       SFX.sunk();
@@ -1028,16 +1175,43 @@ function applyFireResult(msg) {
     SFX.miss();
   }
   if (msg.sunk) {
-    const who = (msg.by === myPlayer) ? 'You' : 'Opponent';
-    statusEl.textContent = who + ' sunk the ' + msg.shipName + '!';
+    const byName = (msg.by === mySeatIdx) ? 'You' : (roster[msg.by] || 'Someone');
+    const targetLabel = (msg.target === mySeatIdx) ? 'your' : ((roster[msg.target] || 'their') + "'s");
+    statusEl.textContent = byName + ' sunk ' + targetLabel + ' ' + msg.shipName + '!';
   }
 }
 
+function markEliminated(seatIdx, reason) {
+  eliminatedSeats[seatIdx] = true;
+  const wrap = enemyBoardWraps[seatIdx];
+  if (wrap) wrap.classList.add('eliminated');
+  updateBoardEnabledStates();
+  if (seatIdx !== mySeatIdx) {
+    const name = roster[seatIdx] || 'A player';
+    statusEl.textContent = name + (reason === 'disconnected' ? ' disconnected and is out.' : ' has been eliminated!');
+  }
+}
+
+function enterSpectatorMode(message) {
+  spectatorMode = true;
+  currentValidTargets = [];
+  updateBoardEnabledStates();
+  spectatorBannerEl.textContent = '👀 ' + (message || 'You have been eliminated — watching the rest of the battle.');
+  spectatorBannerEl.classList.remove('hidden');
+  statusEl.textContent = 'Spectating the rest of the battle...';
+}
+
 function onGameOver(msg) {
-  enemyGrid.classList.add('disabled');
-  enemyGrid.classList.remove('my-turn-glow');
-  const won = msg.winner === myPlayer;
-  winBanner.textContent = won ? '🏆 YOU WIN, CAPTAIN ' + myName.toUpperCase() + '! 🏆' : '💥 You lost — ' + msg.winnerName + ' wins!';
+  currentValidTargets = [];
+  updateBoardEnabledStates();
+  const won = msg.winnerSeat === mySeatIdx;
+  if (won) {
+    winBanner.textContent = '🏆 YOU WIN, CAPTAIN ' + myName.toUpperCase() + '! 🏆';
+  } else if (spectatorMode) {
+    winBanner.textContent = '🏁 ' + msg.winnerName + ' wins! Thanks for watching, Captain ' + myName + '.';
+  } else {
+    winBanner.textContent = '💥 You lost — ' + msg.winnerName + ' wins!';
+  }
   winBanner.classList.remove('hidden');
   statusEl.textContent = 'Game over.';
   rematchBtn.classList.remove('hidden');
@@ -1045,7 +1219,7 @@ function onGameOver(msg) {
     SFX.win();
     launchConfetti();
     spawnFloatyText(window.innerWidth / 2, window.innerHeight * 0.35, '🏆 VICTORY! 🏆', '#ffd166');
-  } else {
+  } else if (!spectatorMode) {
     SFX.lose();
   }
 }
