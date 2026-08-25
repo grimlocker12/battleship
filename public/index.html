@@ -16,6 +16,7 @@
     --sand: #f4f1de;
     --gold: #f2b134;
     --gold-bright: #ffd166;
+    --cell: clamp(22px, 8vw, 32px);
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -52,9 +53,10 @@
 
   h1 {
     letter-spacing: 4px;
-    font-size: 2.1rem;
+    font-size: clamp(1.5rem, 6vw, 2.1rem);
     margin: 6px 0 2px;
     text-shadow: 0 2px 10px rgba(0,0,0,0.5), 0 0 20px rgba(79,168,216,0.3);
+    text-align: center;
   }
   .subtitle { color: var(--sea-light); margin-bottom: 14px; font-size: 0.9rem; letter-spacing: 1px; }
 
@@ -114,6 +116,18 @@
     margin-left: 6px;
     font-size: 0.9rem;
   }
+
+  /* Match history strip */
+  #matchHistory {
+    font-size: 0.8rem;
+    color: rgba(244,241,222,0.6);
+    margin: -8px 0 16px;
+    text-align: center;
+    max-width: 90vw;
+  }
+  #matchHistory .hist-label { color: rgba(244,241,222,0.4); margin-right: 4px; }
+  #matchHistory .hist-chip { font-weight: bold; color: var(--sea-light); }
+  #matchHistory .hist-sep { margin: 0 6px; opacity: 0.4; }
 
   /* Name entry */
   #reconnectBanner {
@@ -183,6 +197,14 @@
   .ship-chip.active { border-color: var(--gold); background: var(--sea-light); font-weight: bold; box-shadow: 0 0 10px rgba(242,177,52,0.6); }
   .ship-chip.placed { background: #2d5f3e; text-decoration: line-through; opacity: 0.65; }
 
+  #opponentProgress {
+    font-size: 0.85rem;
+    color: var(--sea-light);
+    text-align: center;
+    margin: -6px 0 14px;
+    min-height: 1.2em;
+  }
+
   button {
     background: linear-gradient(180deg, var(--gold-bright), var(--gold));
     color: var(--navy);
@@ -202,7 +224,7 @@
 
   .boards {
     display: flex;
-    gap: 36px;
+    gap: clamp(14px, 4vw, 36px);
     flex-wrap: wrap;
     justify-content: center;
   }
@@ -211,8 +233,8 @@
   .board-wrap.active-turn .board-label { color: var(--gold-bright); text-shadow: 0 0 8px rgba(242,177,52,0.7); }
   .grid {
     display: grid;
-    grid-template-columns: repeat(10, 32px);
-    grid-template-rows: repeat(10, 32px);
+    grid-template-columns: repeat(10, var(--cell));
+    grid-template-rows: repeat(10, var(--cell));
     gap: 2px;
     background: rgba(0,0,0,0.25);
     padding: 6px;
@@ -225,15 +247,15 @@
     box-shadow: 0 0 22px rgba(242,177,52,0.35);
   }
   .cell {
-    width: 32px;
-    height: 32px;
+    width: var(--cell);
+    height: var(--cell);
     background: radial-gradient(circle at 35% 30%, var(--sea-light) 0%, var(--sea) 70%);
     border-radius: 4px;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 16px;
+    font-size: calc(var(--cell) * 0.5);
     position: relative;
     overflow: hidden;
     transition: background 0.15s, transform 0.1s;
@@ -411,6 +433,7 @@
     <div class="subtitle">Local network multiplayer</div>
     <div id="status">Connecting...</div>
     <div id="scoreboard" class="hidden"></div>
+    <div id="matchHistory" class="hidden"></div>
 
     <div id="reconnectBanner" class="hidden">
       <p id="reconnectMessage">Connection lost.</p>
@@ -431,6 +454,7 @@
         <button id="readyBtn" disabled>Ready!</button>
       </div>
       <div class="ship-list" id="shipList"></div>
+      <div id="opponentProgress"></div>
       <div class="boards">
         <div class="board-wrap">
           <div class="board-label">Place your fleet</div>
@@ -639,6 +663,8 @@ const namePhase = document.getElementById('namePhase');
 const nameInput = document.getElementById('nameInput');
 const nameSubmitBtn = document.getElementById('nameSubmitBtn');
 const scoreboardEl = document.getElementById('scoreboard');
+const matchHistoryEl = document.getElementById('matchHistory');
+const opponentProgressEl = document.getElementById('opponentProgress');
 const placementPhase = document.getElementById('placementPhase');
 const battlePhase = document.getElementById('battlePhase');
 const placementGrid = document.getElementById('placementGrid');
@@ -694,6 +720,7 @@ function handleMessage(msg) {
     case 'scoreboard':
       names = msg.names;
       updateScoreboard(msg.scores);
+      updateMatchHistory(msg.history);
       break;
     case 'startPlacement':
       shipDefs = msg.shipDefs;
@@ -702,6 +729,11 @@ function handleMessage(msg) {
       break;
     case 'placeAccepted':
       onPlaceAccepted(msg);
+      break;
+    case 'opponentProgress':
+      opponentProgressEl.textContent = msg.placed === 0
+        ? "Opponent hasn't placed any ships yet."
+        : 'Opponent has placed ' + msg.placed + '/' + msg.total + ' ships.';
       break;
     case 'placeRejected':
       statusEl.textContent = msg.reason;
@@ -783,6 +815,16 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
+// ---------- Match history ----------
+function updateMatchHistory(history) {
+  if (!history || !history.length) { matchHistoryEl.classList.add('hidden'); return; }
+  const chips = history.slice(0, 5)
+    .map(h => '<span class="hist-chip">' + escapeHtml(h.winner) + '</span>')
+    .join('<span class="hist-sep">·</span>');
+  matchHistoryEl.innerHTML = '<span class="hist-label">Recent wins:</span>' + chips;
+  matchHistoryEl.classList.remove('hidden');
+}
+
 // ---------- Placement phase ----------
 function startPlacementPhase() {
   placementDone = false;
@@ -794,6 +836,7 @@ function startPlacementPhase() {
   winBanner.classList.add('hidden');
   rematchBtn.classList.add('hidden');
   statusEl.textContent = 'Place your ships. Click a starting cell for the highlighted ship.';
+  opponentProgressEl.textContent = "Opponent hasn't placed any ships yet.";
   buildShipList();
   buildGrid(placementGrid, BOARD_SIZE, onPlacementCellClick, onPlacementCellHover);
   readyBtn.disabled = true;
