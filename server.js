@@ -42,21 +42,28 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
 // ---- Persistent scoreboard (survives server restarts / new sessions) ----
+const MAX_HISTORY = 10;
 function loadScores() {
   try {
-    return JSON.parse(fs.readFileSync(SCORES_FILE, 'utf8'));
+    const raw = JSON.parse(fs.readFileSync(SCORES_FILE, 'utf8'));
+    if (raw && typeof raw === 'object' && raw.scores) {
+      return { scores: raw.scores, history: Array.isArray(raw.history) ? raw.history : [] };
+    }
+    // Old file format was a flat { name: count } map, pre-dating match
+    // history. Treat it as the scores half of the new shape.
+    return { scores: (raw && typeof raw === 'object') ? raw : {}, history: [] };
   } catch {
-    return {};
+    return { scores: {}, history: [] };
   }
 }
-function saveScores(scores) {
+function saveScores(data) {
   try {
-    fs.writeFileSync(SCORES_FILE, JSON.stringify(scores, null, 2));
+    fs.writeFileSync(SCORES_FILE, JSON.stringify(data, null, 2));
   } catch (e) {
     console.error('Could not save scores.json:', e.message);
   }
 }
-let scores = loadScores(); // { "Alice": 3, "Bob": 1, ... }
+let scoreData = loadScores(); // { scores: { "Alice": 3, "Bob": 1 }, history: [{winner, loser, endedAt}, ...] }
 
 // ---- Simple static file server for the client page ----
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -133,9 +140,10 @@ function broadcastScoreboard() {
     type: 'scoreboard',
     names: game.names,
     scores: {
-      p1: n1 ? (scores[n1] || 0) : 0,
-      p2: n2 ? (scores[n2] || 0) : 0,
+      p1: n1 ? (scoreData.scores[n1] || 0) : 0,
+      p2: n2 ? (scoreData.scores[n2] || 0) : 0,
     },
+    history: scoreData.history,
   });
 }
 
@@ -273,12 +281,16 @@ function handleMessage(ws, raw) {
       cells.forEach(([r, c]) => { board[r][c] = shipIndex; });
       game.ships[myIdx].push({ name: shipDef.name, size: shipDef.size, cells, hits: 0 });
       send(ws, { type: 'placeAccepted', shipName: shipDef.name, cells });
+      const otherIdx = myIdx === 0 ? 1 : 0;
+      send(game.players[otherIdx], { type: 'opponentProgress', placed: game.ships[myIdx].length, total: SHIP_DEFS.length });
     }
 
     if (msg.type === 'clearPlacement') {
       game.boards[myIdx] = emptyBoard();
       game.ships[myIdx] = [];
       send(ws, { type: 'placementCleared' });
+      const otherIdx = myIdx === 0 ? 1 : 0;
+      send(game.players[otherIdx], { type: 'opponentProgress', placed: 0, total: SHIP_DEFS.length });
     }
 
     if (msg.type === 'ready') {
@@ -339,8 +351,11 @@ function handleMessage(ws, raw) {
       if (allSunk) {
         game.over = true;
         const winnerName = game.names[myIdx];
-        scores[winnerName] = (scores[winnerName] || 0) + 1;
-        saveScores(scores);
+        const loserName = game.names[otherIdx];
+        scoreData.scores[winnerName] = (scoreData.scores[winnerName] || 0) + 1;
+        scoreData.history.unshift({ winner: winnerName, loser: loserName, endedAt: new Date().toISOString() });
+        scoreData.history = scoreData.history.slice(0, MAX_HISTORY);
+        saveScores(scoreData);
         broadcast({ type: 'gameOver', winner: myIdx + 1, winnerName });
         broadcastScoreboard();
       } else {

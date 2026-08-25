@@ -9,16 +9,23 @@ on the same home WiFi/network.
 > was found and fixed, none of which is otherwise visible just from
 > reading the code.
 
-## Two ways to run this
+## Ways to run this
 
-**Option A — Permanent install on TrueNAS CORE (recommended if you have it):**
-Runs as a real always-on service in a jail — starts automatically when your
-NAS boots, and restarts itself automatically if it ever crashes. Nobody
-ever has to start a server. See **[deploy/TRUENAS-SETUP.md](deploy/TRUENAS-SETUP.md)**.
+**Option A — Docker on TrueNAS SCALE (recommended):** Runs as a real
+always-on app — starts automatically when your NAS boots, and Kubernetes
+restarts it automatically if it ever crashes. Nobody ever has to start a
+server. See **[deploy/DOCKER-TRUENAS-SCALE.md](deploy/DOCKER-TRUENAS-SCALE.md)**.
 
 **Option B — Manual run on any Windows/Mac PC:** Good for trying it out, or
 if you don't have a NAS. One PC has to run the server each time you want to
 play. Instructions below.
+
+**Legacy — TrueNAS CORE (jails):** if you're still on TrueNAS CORE rather
+than SCALE, the old iocage-jail setup still works —
+**[deploy/INSTALL-WITH-WINSCP.md](deploy/INSTALL-WITH-WINSCP.md)** (no
+terminal experience needed) or **[deploy/TRUENAS-SETUP.md](deploy/TRUENAS-SETUP.md)**
+(comfortable with a host shell/SSH). Not needed if you're on SCALE — use
+Option A instead.
 
 ---
 
@@ -85,15 +92,19 @@ connections.
 
 ## Scoreboard & names
 
-- The scoreboard at the top tracks total wins per name and updates live.
-- Win counts are saved to a `scores.json` file next to `server.js` on the
-  host PC, so they survive server restarts — if the kids play again
+- The scoreboard at the top tracks total wins per name and updates live,
+  with a "Recent wins" strip underneath showing the last few game results.
+- Win counts and match history are saved to a `scores.json` file next to
+  `server.js` on the host PC (or in the mounted volume, if running in
+  Docker), so they survive server restarts — if the kids play again
   tomorrow, their tally from last time is still there.
 - Each PC also remembers the name typed into it (via the browser), so kids
   won't need to retype their name every session — just confirm it.
 - Names are shared across the whole household network, so make sure each
   kid always uses the same name if you want their win count to keep
   accumulating correctly.
+- During ship placement, each player sees a live "Opponent has placed X/5
+  ships" indicator, so nobody's stuck wondering why the other side is quiet.
 
 ## Sound & visuals
 

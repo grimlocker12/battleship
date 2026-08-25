@@ -93,9 +93,99 @@ the host machine's LAN IP on port 3000.
 5. **The credit line.** Andreas asked for a footer crediting him as the
    creator, explicitly leaving it up to Claude's judgment whether to
    mention AI involvement. Current text in `public/index.html`:
-   `⚓ Built by Andreas Andersson — with a little help from Claude AI`.
-   This was a deliberate, requested addition — not something to remove or
-   "clean up" as boilerplate.
+   `⚓ Built by Andreas Andersson — with a little help from Claude AI (and a
+   bug-squashing pass by Claude Code)`. This was a deliberate, requested
+   addition — not something to remove or "clean up" as boilerplate.
+
+   Between this entry and the next one, the project also picked up (outside
+   any Claude Code session — likely more claude.ai chat work): server-side
+   path-traversal hardening on the static file server (`server.js`, see the
+   `PUBLIC_DIR` check), ship emoji on placed ships, a hit/miss quote system
+   with floating text + particle bursts + screen shake, an animated wave
+   footer, and `deploy/INSTALL-WITH-WINSCP.md` (a no-terminal WinSCP-based
+   walkthrough of the same jail setup as `TRUENAS-SETUP.md`). None of that
+   is described elsewhere in this file — worth knowing if something in
+   those areas looks unfamiliar.
+
+6. **Docker packaging + move to TrueNAS SCALE.** Andreas upgraded his NAS
+   from TrueNAS CORE to SCALE (Dragonfish-24.04.2.5), which doesn't use
+   iocage jails — it runs apps as containers via k3s/containerd instead.
+   Added:
+   - `Dockerfile` — `node:20-alpine`, runs as the built-in non-root `node`
+     user (uid 1000), writes the scoreboard to `/data` (a declared volume),
+     has a `wget`-based `HEALTHCHECK` against `/`. Built and
+     smoke-tested locally with real `docker build`/`docker run` — confirmed
+     non-root `/data` ownership, that a save survives a full container
+     destroy/recreate against a named volume, and that the healthcheck
+     reports healthy.
+   - `docker-compose.yml` — for local testing only (`docker compose up
+     --build`), not how it runs on SCALE.
+   - `deploy/DOCKER-TRUENAS-SCALE.md` — the new recommended deployment
+     path, superseding the iocage-jail docs for SCALE users. Defaults to
+     importing a pre-built `battleship-image.tar.gz` directly into SCALE's
+     containerd store via `k3s ctr -n k8s.io images import` (no Docker Hub
+     account, nothing leaves the LAN — consistent with the project's
+     LAN-only philosophy below), with pushing to a registry documented as
+     the alternative. Walks through SCALE's "Custom App" UI: image pull
+     policy `IfNotPresent` (critical — otherwise Kubernetes tries to pull
+     from Docker Hub and fails, since there's no public `battleship`
+     image), a host-path volume for `/data`, and chowning that host dataset
+     to uid 1000 (or overriding the container's run-as UID) so the
+     non-root container can write to it.
+   - `server.js` — `scores.json` changed shape from a flat `{name: count}`
+     map to `{ scores: {...}, history: [...] }` to support a "recent
+     match history" list (see next entry). `loadScores()` auto-migrates
+     the old flat format on read, so an existing scoreboard file (e.g.
+     copied over from the old CORE jail) upgrades itself the first time
+     the new server reads it — no manual conversion needed.
+   - `server.js` — closed a validation gap in the `place` and `fire`
+     handlers: `row`/`col` are now required to be actual integers (a
+     crafted non-numeric value could previously reach `board[NaN][c]`,
+     which throws — caught by the existing try/catch, but now rejected
+     cleanly instead), and ship name/size for `place` are now taken from
+     the server's own `SHIP_DEFS` by placement order rather than trusted
+     from the client message, closing off a mismatched-size/"ghost ship"
+     vector. Also removed a line of dead code in the connection handler
+     (an unreachable fallback for player-slot assignment).
+
+   The exact TrueNAS SCALE UI field names/paths in the deploy doc are
+   written from general knowledge of Dragonfish's Apps UI, not verified
+   against a live SCALE box (none available in this environment) — same
+   caveat as the original CORE docs. The *goal* of each step is stated
+   clearly so it's followable even if a label has shifted slightly.
+
+7. **General polish pass (same session as #6).** Andreas asked for a few
+   small, low-risk improvements alongside the Docker work — not a specific
+   feature list, just "things you'd suggest." Landed:
+   - **Mobile-friendly layout.** Grid cell size changed from a fixed `32px`
+     to `clamp(22px, 8vw, 32px)` via a `--cell` CSS variable (used by both
+     `.grid` and `.cell`), with `.boards` gap and the `h1` font-size also
+     switched to `clamp()`. No JS or breakpoints involved — pure fluid
+     CSS. Verified via the browser tool at 375px and 320px viewport widths
+     (placement phase and battle phase, i.e. one board and two boards) with
+     zero horizontal overflow (`scrollWidth === clientWidth` at both
+     sizes) — a real screenshot wasn't available in this environment, so
+     that DOM-measurement check was the verification method, same
+     script-over-static-analysis spirit as the rest of this file.
+   - **Live placement progress.** New `opponentProgress`/`clearPlacement`
+     server broadcasts (`server.js`) tell the *other* player "opponent has
+     placed X/5 ships" as it happens, shown in a new `#opponentProgress`
+     line in the placement phase (`public/index.html`) — previously the
+     only signal was silence until the opponent clicked Ready.
+   - **Match history.** The `scores.json` reshape in entry #6 backs a
+     "Recent wins" strip under the scoreboard, showing up to the last 5
+     game results (winner names only, most recent first) via a new
+     `history` field on the `scoreboard` broadcast. Capped server-side at
+     `MAX_HISTORY = 10` entries.
+   - Declined (Andreas's choice, not a technical constraint): a 3rd-player
+     spectator queue, and a how-to-play help modal.
+
+   All three were verified end-to-end with the browser tool against a real
+   `node server.js` (two tabs: names/placement driven by simulated clicks,
+   then the battle phase driven by direct `ws.send` scripting to reach a
+   real game-over quickly — same "throwaway script against a running
+   server" approach described below in Testing approach) — not just read
+   over statically.
 
 ## Testing approach used so far
 
