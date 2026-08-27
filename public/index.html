@@ -724,10 +724,37 @@ const winBanner = document.getElementById('winBanner');
 // onclose text below doesn't stomp something more useful.
 let terminalMessageShown = false;
 
+// The reconnect token is saved in two places for two different failure
+// modes: sessionStorage is tab-scoped, so it's always correct even if
+// another tab on the same device is mid-game with a different seat -- but
+// it's wiped if this tab gets fully closed (not just refreshed/reloaded).
+// localStorage survives a full tab close/reopen, which is what "force-close
+// the app and reopen it" (a very normal way to think of "reconnecting" on a
+// phone) actually does -- but it's shared across every tab on the origin,
+// so it can't be trusted as the *only* source once two tabs are involved.
+// Reading sessionStorage first, falling back to localStorage, gets both:
+// same-tab refreshes are always exact, and a fully-closed-and-reopened tab
+// still recovers its token. In the rare case of two concurrent tabs on one
+// device, the worst case if the wrong token gets picked up is a failed
+// reconnect (falls through to the normal new-connection flow) -- the
+// server only ever reclaims a seat that's actually disconnected/pending, so
+// this can't hijack another tab's live session.
+function saveToken(token) {
+  try { sessionStorage.setItem('battleship_token', token); } catch { /* ignore */ }
+  try { localStorage.setItem('battleship_token', token); } catch { /* ignore */ }
+}
+function loadToken() {
+  try {
+    return sessionStorage.getItem('battleship_token') || localStorage.getItem('battleship_token');
+  } catch {
+    return null;
+  }
+}
+
 function connect() {
   terminalMessageShown = false;
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const token = sessionStorage.getItem('battleship_token');
+  const token = loadToken();
   const url = proto + '://' + location.host + (token ? '/?token=' + encodeURIComponent(token) : '');
   ws = new WebSocket(url);
   ws.onopen = () => { statusEl.textContent = 'Connected. Waiting for assignment...'; };
@@ -756,7 +783,7 @@ function handleMessage(msg) {
   switch (msg.type) {
     case 'welcome':
       mySeatIdx = msg.seatIdx;
-      if (msg.token) sessionStorage.setItem('battleship_token', msg.token);
+      if (msg.token) saveToken(msg.token);
       showNamePhase();
       break;
     case 'reconnected':
@@ -1274,7 +1301,7 @@ rematchBtn.addEventListener('click', () => {
 // this is a silent replay of state the player already lived through.
 function hydrateFromReconnect(msg) {
   mySeatIdx = msg.seatIdx;
-  if (msg.token) sessionStorage.setItem('battleship_token', msg.token);
+  if (msg.token) saveToken(msg.token);
   myName = msg.name;
   hasNamedSelf = true;
   currentPlayers = msg.players;

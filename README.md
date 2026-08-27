@@ -140,7 +140,8 @@ connections.
   (next to `server.js`) and restart the server — it'll start a fresh one
   automatically.
 - If someone's browser refreshes, closes, or briefly loses WiFi mid-game,
-  they have about 30 seconds to reload the page and get dropped right back
+  they have about a minute to reopen the page (even if the tab or app was
+  fully closed) and get dropped right back
   into their seat — same board, same ships, same turn. Everyone else just
   sees a "waiting for them to reconnect..." message in the meantime, and the
   game isn't paused for anyone whose turn it isn't. If they don't make it

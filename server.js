@@ -14,7 +14,7 @@ const { WebSocketServer } = require('ws');
 const PORT = parseInt(process.env.PORT, 10) || 3000;
 // How long a disconnected seat is held open for a reconnect before it's
 // actually treated as gone (placement roster-shrink / battle elimination).
-const GRACE_MS = parseInt(process.env.BATTLESHIP_GRACE_MS, 10) || 30000;
+const GRACE_MS = parseInt(process.env.BATTLESHIP_GRACE_MS, 10) || 60000;
 // How often we ping every client to detect dead connections that never sent
 // a clean close frame (e.g. a Kubernetes NodePort's conntrack silently
 // dropping an idle WebSocket after a few minutes of no traffic). Both

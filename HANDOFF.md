@@ -336,8 +336,12 @@ connects to the host machine's LAN IP on port 3000.
    collided on one shared token and broke each other's reconnect; a token
    scoped to `sessionStorage` is naturally per-tab and doesn't have this
    problem, while `battleship_name` stays on `localStorage` since a
-   collision there is harmless pre-fill text, not a broken session). Fixed
-   the `onclose` stomping bug via a `terminalMessageShown` flag so a
+   collision there is harmless pre-fill text, not a broken session).
+   **Superseded a few hours later by entry 10 below** -- `sessionStorage`
+   alone turned out to be wrong for a different reason (it doesn't survive a
+   fully closed-and-reopened tab, which is the normal way to think of
+   "reconnecting" on a phone). Fixed the `onclose` stomping bug via a
+   `terminalMessageShown` flag so a
    `full`/`gameInProgress`/`sessionExpired` message survives instead of
    being overwritten. A new `hydrateFromReconnect()` rebuilds the UI
    silently (no sound/particle effects -- it's a replay of state the player
@@ -359,6 +363,48 @@ connects to the host machine's LAN IP on port 3000.
    what caught the `sessionStorage` bug above -- the scripted tests, using
    separate process-level `ws` clients, can't catch a same-origin
    `localStorage` collision that only shows up with two actual browser tabs).
+
+10. **Reconnect follow-up: the token needed to survive a closed tab, not
+    just a refresh.** Shipped entry 9, and Andreas reported it still didn't
+    work: reconnecting on his phone by force-closing and reopening the
+    browser tab landed on "A game is already in progress," not a resync.
+    Root cause: `sessionStorage` (chosen in entry 9 specifically to fix the
+    two-tabs-on-one-device collision) is scoped to a single tab's lifetime
+    -- it's wiped the moment that tab is actually closed, which is exactly
+    what "force-close the app and reopen it" does. A same-tab refresh or a
+    WiFi blip (tab stays alive) had always worked; a fully closed-and-reopened
+    tab never could, and that turned out to be Andreas's normal mental model
+    of "the player dropped and rejoined."
+
+    Fix: read the token from `sessionStorage` first, falling back to
+    `localStorage` if empty (`loadToken()`), and write it to *both* on every
+    `welcome`/`reconnected` (`saveToken()`). This keeps entry 9's fix intact
+    (a same-tab refresh is always exact, since `sessionStorage` is checked
+    first and can't be polluted by another tab) while also surviving a full
+    tab close, since `localStorage` persists across that. The remaining edge
+    case -- two tabs open *concurrently* on one device, one of them closed
+    and reopened -- can in theory pick up the wrong tab's token from
+    `localStorage`; this was deliberately accepted rather than engineered
+    around, because the failure mode is safe: `server.js`'s token match only
+    ever reclaims a seat that's actually disconnected/grace-pending, never
+    one with a live open socket, so a wrong-token guess just falls through
+    to the normal "new connection" flow (same rejection as today, not a
+    hijack of someone else's active session) instead of anything worse.
+
+    Also bumped the default `GRACE_MS` from 30s to 60s -- realistic
+    "reconnect" timing on a phone (unlock, find the tab, reload, wait for
+    the page to load) is looser than a scripted test's instant retry, and
+    Andreas's repro was already "within ~30s," uncomfortably close to the
+    old default.
+
+    Verified the same way as entry 9's client-side fix had to be: real
+    browser testing, not scripted `ws` clients (storage behavior is entirely
+    a browser-JS concern the protocol tests can't see). Specifically:
+    closed a tab mid-battle, opened a **new** tab (not a reload) to the same
+    origin, and confirmed it resynced correctly; separately cleared
+    `sessionStorage` alone via devtools and confirmed `loadToken()` still
+    recovered the token from `localStorage`, to isolate the fallback logic
+    itself from any quirks of the specific test environment's tab handling.
 
 ## Testing approach used so far
 

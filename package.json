@@ -1,6 +1,6 @@
 {
   "name": "battleship-lan",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Simple local-network multiplayer Battleship for 2-4 players.",
   "main": "server.js",
   "scripts": {
