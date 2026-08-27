@@ -274,6 +274,92 @@ connects to the host machine's LAN IP on port 3000.
    unattributed claude.ai session described in entry 5) — Andreas's kids
    found it annoying. Pure removal, no replacement effect requested.
 
+9. **Reconnect + heartbeat + stuck-game fix.** After real family play of the
+   2-4 player version, Andreas reported two bugs: a player who dropped out
+   mid-game landed on a dead-end "Disconnected from server" screen, and once
+   an entire 4-player game finished and someone clicked "Play again,"
+   *everyone* ended up disconnected with no recovery short of restarting the
+   TrueNAS pod. Both were reproduced and root-caused with scripted `ws`
+   clients (same convention as always) before writing any fix:
+   - `wss.on('connection', ...)` flatly rejected any connection with
+     `gameInProgress` + `ws.close()` whenever `game.phase !== 'lobby'` --
+     there was no way back into a game once you dropped, ever.
+   - The client's `ws.onclose` unconditionally overwrote whatever message
+     was just shown with a generic "Disconnected from server," so that
+     rejection looked like an unexplained crash.
+   - There was no WebSocket heartbeat anywhere. On the real TrueNAS SCALE
+     deployment, traffic goes through a Kubernetes NodePort, and kube-proxy
+     conntrack silently drops idle connections after a few minutes of no
+     traffic (very plausible during slow ship placement) -- Node had no way
+     to notice a socket had gone zombie, since no clean `close` event ever
+     fires for one.
+   - The `rematch` handler trusted `ws.readyState === OPEN` to decide who
+     was still in the game, so a zombie connection could get counted as a
+     real survivor, dragging a phantom seat into a placement phase that
+     could never complete -- permanently wedging `game.phase` outside
+     `'lobby'`, with no way for anyone (even real, still-connected players
+     hitting refresh) to ever get a fresh room without a manual restart.
+
+   **Fix, in `server.js`:** every seat gained a persistent `token` (a
+   `crypto.randomUUID()`, handed back on `welcome`/`reconnected`) and a
+   `graceTimer`. A placement/battle disconnect no longer tears the seat down
+   immediately -- it broadcasts `opponentConnectionLost` and starts a
+   `GRACE_MS` (default 30s, env-overridable) timer via the new
+   `onGraceExpired(seatIdx)`, which contains exactly the cleanup logic that
+   used to run immediately (roster-shrink/bounce-to-lobby for placement,
+   `eliminateSeat(idx, 'disconnected')` for battle) -- **a delay, not a
+   behavior change**, so it doesn't weaken entry 8's "disconnect =
+   elimination, unified" decision, just gives it a grace window first. A
+   reconnecting browser appends its saved token as a `?token=` query string
+   on the WebSocket URL itself (read from the upgrade `req.url`, so there's
+   no message-ordering race to worry about); if it matches a seat that's
+   still reclaimable, the connection is restored to that exact seat and gets
+   a `reconnected` message instead of `welcome`, carrying whatever state its
+   phase needs to rebuild the UI (own ships in placement; both players'
+   *redacted* hit/miss grids plus which ships are already sunk in battle --
+   the server never leaks unsunk ship positions, even to a reconnecting
+   owner, past what's needed to redraw their own board from their own known
+   ship layout). A standard `ws` `isAlive`/`ping`/`pong`/`terminate`
+   heartbeat now runs continuously and calls `terminate()` on anything that
+   stops answering -- that fires the same `close` event a clean disconnect
+   would, so zombie connections flow through the identical grace-period path
+   with no special-casing. Finally, `maybeAutoResetToLobby()` runs after
+   every close/grace-expiry: if the room is ever outside `'lobby'` with zero
+   live connections *and* zero pending grace timers, it just resets to a
+   fresh lobby -- the room can no longer get permanently stuck no matter what
+   combination of drops and abandonment happens.
+
+   **Client (`public/index.html`):** the WebSocket URL now carries a saved
+   token from `sessionStorage` (**not** `localStorage` -- a real bug caught
+   during manual two-tab browser testing: `localStorage` is shared across
+   every tab on the same origin, so two tabs open on the same device
+   collided on one shared token and broke each other's reconnect; a token
+   scoped to `sessionStorage` is naturally per-tab and doesn't have this
+   problem, while `battleship_name` stays on `localStorage` since a
+   collision there is harmless pre-fill text, not a broken session). Fixed
+   the `onclose` stomping bug via a `terminalMessageShown` flag so a
+   `full`/`gameInProgress`/`sessionExpired` message survives instead of
+   being overwritten. A new `hydrateFromReconnect()` rebuilds the UI
+   silently (no sound/particle effects -- it's a replay of state the player
+   already lived through) by reusing `startPlacementPhase()`/
+   `startBattlePhase()` plus small DOM-only helpers factored out of the live
+   incremental handlers (`paintShipOnBoard()` out of `onPlaceAccepted()`,
+   `paintResultCell()` out of `applyFireResult()`) so the live and
+   reconnect-replay paths can't drift apart.
+
+   **Testing:** extended the scripted-`ws`-client convention with
+   env-overridable `BATTLESHIP_GRACE_MS`/`BATTLESHIP_HEARTBEAT_MS` so timing
+   assertions run in well under a second -- placement and battle reconnect
+   within grace, grace expiry still eliminating correctly (regression check
+   against entry 8), a fully-abandoned mid-battle room self-healing to a
+   fresh lobby, a heartbeat catching a raw-socket-killed zombie connection
+   (`client._socket.destroy()`, since a stock `ws` client auto-answers
+   pings), and the original full-4-player-game-then-rematch report as a
+   direct regression check. Then real two-tab browser verification (this is
+   what caught the `sessionStorage` bug above -- the scripted tests, using
+   separate process-level `ws` clients, can't catch a same-origin
+   `localStorage` collision that only shows up with two actual browser tabs).
+
 ## Testing approach used so far
 
 There's no permanent test suite in this repo (kept it minimal for a family

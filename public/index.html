@@ -719,11 +719,19 @@ const randomBtn = document.getElementById('randomBtn');
 const rematchBtn = document.getElementById('rematchBtn');
 const winBanner = document.getElementById('winBanner');
 
+// Set right before we already know why a connection is ending (a rejection
+// with its own clear message, or lockGame()'s own message) so the generic
+// onclose text below doesn't stomp something more useful.
+let terminalMessageShown = false;
+
 function connect() {
+  terminalMessageShown = false;
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(proto + '://' + location.host);
+  const token = sessionStorage.getItem('battleship_token');
+  const url = proto + '://' + location.host + (token ? '/?token=' + encodeURIComponent(token) : '');
+  ws = new WebSocket(url);
   ws.onopen = () => { statusEl.textContent = 'Connected. Waiting for assignment...'; };
-  ws.onclose = () => { statusEl.textContent = 'Disconnected from server.'; };
+  ws.onclose = () => { if (!terminalMessageShown) statusEl.textContent = 'Disconnected from server.'; };
   ws.onmessage = (ev) => handleMessage(JSON.parse(ev.data));
 }
 
@@ -741,18 +749,32 @@ function lockGame(message) {
   reconnectMessage.textContent = message;
   reconnectBanner.classList.remove('hidden');
   statusEl.textContent = '';
+  terminalMessageShown = true;
 }
 
 function handleMessage(msg) {
   switch (msg.type) {
     case 'welcome':
       mySeatIdx = msg.seatIdx;
+      if (msg.token) sessionStorage.setItem('battleship_token', msg.token);
       showNamePhase();
       break;
+    case 'reconnected':
+      hydrateFromReconnect(msg);
+      break;
+    case 'opponentConnectionLost':
+      statusEl.textContent = (msg.name || 'A player') + ' lost connection — waiting up to ' +
+        Math.round((msg.graceMs || 0) / 1000) + 's for them to reconnect...';
+      break;
+    case 'opponentReconnected':
+      statusEl.textContent = (msg.name || 'A player') + ' reconnected!';
+      break;
     case 'full':
+      terminalMessageShown = true;
       statusEl.textContent = 'Game is full (4 players already). Try again once it finishes.';
       break;
     case 'gameInProgress':
+      terminalMessageShown = true;
       statusEl.textContent = 'A game is already in progress. Try again once it finishes.';
       break;
     case 'nameAccepted':
@@ -1007,16 +1029,22 @@ function onPlacementCellClick(row, col) {
   ws.send(JSON.stringify({ type: 'place', row, col, size: ship.size, horizontal, shipName: ship.name }));
 }
 
-function onPlaceAccepted(msg) {
-  placedShips.push({ name: msg.shipName, cells: msg.cells });
-  SFX.place();
-  const emoji = SHIP_EMOJI[msg.shipName] || '';
-  msg.cells.forEach(([r, c]) => {
+// DOM-only: paints one ship's cells onto the placement grid and marks them
+// owned. Shared by the live placeAccepted flow and a reconnect replay.
+function paintShipOnBoard(shipName, cells) {
+  const emoji = SHIP_EMOJI[shipName] || '';
+  cells.forEach(([r, c]) => {
     myBoardOwnership[r][c] = true;
     const cell = getCell(placementGrid, r, c);
     cell.classList.add('own-ship');
     cell.textContent = emoji;
   });
+}
+
+function onPlaceAccepted(msg) {
+  placedShips.push({ name: msg.shipName, cells: msg.cells });
+  SFX.place();
+  paintShipOnBoard(msg.shipName, msg.cells);
   currentShipIdx++;
   clearPreview();
   buildShipList();
@@ -1151,14 +1179,26 @@ function onFireClick(targetSeatIdx, row, col) {
   ws.send(JSON.stringify({ type: 'fire', targetSeat: targetSeatIdx, row, col }));
 }
 
+// DOM-only: paints hit/miss/sunk styling onto a single cell, no sound or
+// particle effects. Shared by the live fireResult flow and a silent
+// reconnect replay.
+function paintResultCell(cell, result, sunk) {
+  if (result === 'hit') {
+    cell.classList.add(sunk ? 'sunk-cell' : 'hit');
+    cell.textContent = sunk ? '☠' : '✸';
+  } else {
+    cell.classList.add('miss');
+    cell.textContent = '•';
+  }
+}
+
 function applyFireResult(msg) {
   const targetGrid = (msg.target === mySeatIdx) ? myGrid : enemyGrids[msg.target];
   if (!targetGrid) return;
   const cell = getCell(targetGrid, msg.row, msg.col);
   const { x, y } = cellCenter(cell);
+  paintResultCell(cell, msg.result, msg.sunk);
   if (msg.result === 'hit') {
-    cell.classList.add(msg.sunk ? 'sunk-cell' : 'hit');
-    cell.textContent = msg.sunk ? '☠' : '✸';
     spawnParticles(x, y, '💥', msg.sunk ? 12 : 6);
     if (msg.sunk) {
       spawnFloatyText(x, y, 'SUNK!', '#ff8a4d');
@@ -1168,8 +1208,6 @@ function applyFireResult(msg) {
       SFX.hit();
     }
   } else {
-    cell.classList.add('miss');
-    cell.textContent = '•';
     spawnParticles(x, y, '💦', 4);
     spawnFloatyText(x, y, pickQuote(MISS_QUOTES), '#cfe0ea');
     SFX.miss();
@@ -1228,6 +1266,67 @@ rematchBtn.addEventListener('click', () => {
   SFX.click();
   ws.send(JSON.stringify({ type: 'rematch' }));
 });
+
+// ---------- Reconnect ----------
+// Rebuilds this browser's UI from scratch after reclaiming a seat mid-game
+// (placement or battle), instead of the dead-end "game in progress" wall a
+// fresh connection would otherwise hit. No sound/particle effects here —
+// this is a silent replay of state the player already lived through.
+function hydrateFromReconnect(msg) {
+  mySeatIdx = msg.seatIdx;
+  if (msg.token) sessionStorage.setItem('battleship_token', msg.token);
+  myName = msg.name;
+  hasNamedSelf = true;
+  currentPlayers = msg.players;
+  roster = {};
+  msg.players.forEach((p) => { roster[p.seatIdx] = p.name; });
+
+  if (msg.phase === 'placement') {
+    shipDefs = msg.shipDefs;
+    startPlacementPhase(msg.players);
+    msg.placedShips.forEach((ship) => {
+      placedShips.push({ name: ship.name, cells: ship.cells });
+      paintShipOnBoard(ship.name, ship.cells);
+    });
+    currentShipIdx = placedShips.length;
+    clearPreview();
+    buildShipList();
+    opponentProgressBySeat = {};
+    (msg.opponentProgress || []).forEach((p) => { opponentProgressBySeat[p.seatIdx] = { placed: p.placed, total: p.total }; });
+    renderOpponentProgress();
+    if (currentShipIdx >= shipDefs.length) {
+      placementDone = true;
+      readyBtn.disabled = !!msg.ready;
+    } else {
+      placementDone = false;
+      readyBtn.disabled = true;
+    }
+  } else if (msg.phase === 'battle') {
+    placedShips = msg.placedShips.map((s) => ({ name: s.name, cells: s.cells })); // read by startBattlePhase
+    startBattlePhase(msg.players);
+
+    Object.keys(msg.boards).forEach((seatIdxStr) => {
+      const seatIdx = Number(seatIdxStr);
+      const grid = (seatIdx === mySeatIdx) ? myGrid : enemyGrids[seatIdx];
+      if (!grid) return;
+      const boardData = msg.boards[seatIdxStr];
+      const sunkCellKeys = new Set();
+      boardData.sunkShips.forEach((sh) => sh.cells.forEach(([r, c]) => sunkCellKeys.add(r + ',' + c)));
+      boardData.cells.forEach((row, r) => row.forEach((val, c) => {
+        if (val !== 'hit' && val !== 'miss') return;
+        const cell = getCell(grid, r, c);
+        paintResultCell(cell, val, sunkCellKeys.has(r + ',' + c));
+      }));
+    });
+
+    (msg.eliminatedSeats || []).forEach((seatIdx) => markEliminated(seatIdx, 'sunk'));
+    currentValidTargets = msg.myTurnState.isYourTurn ? msg.myTurnState.targets.map((t) => t.seatIdx) : [];
+    if (msg.spectator) enterSpectatorMode('Welcome back — still watching the rest of the battle.');
+    updateBoardEnabledStates();
+  }
+
+  statusEl.textContent = 'Reconnected! Welcome back, Captain ' + myName + '.';
+}
 
 connect();
 </script>

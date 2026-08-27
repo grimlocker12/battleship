@@ -8,9 +8,18 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 
 const PORT = parseInt(process.env.PORT, 10) || 3000;
+// How long a disconnected seat is held open for a reconnect before it's
+// actually treated as gone (placement roster-shrink / battle elimination).
+const GRACE_MS = parseInt(process.env.BATTLESHIP_GRACE_MS, 10) || 30000;
+// How often we ping every client to detect dead connections that never sent
+// a clean close frame (e.g. a Kubernetes NodePort's conntrack silently
+// dropping an idle WebSocket after a few minutes of no traffic). Both
+// constants are env-overridable so tests can shrink them.
+const HEARTBEAT_INTERVAL_MS = parseInt(process.env.BATTLESHIP_HEARTBEAT_MS, 10) || 30000;
 const SHIP_DEFS = [
   { name: 'Carrier', size: 5 },
   { name: 'Battleship', size: 4 },
@@ -36,6 +45,7 @@ process.on('unhandledRejection', (err) => {
 });
 function shutdown(signal) {
   console.log(`Received ${signal}, shutting down cleanly...`);
+  clearInterval(heartbeatInterval);
   server.close(() => process.exit(0));
   // Force-exit if close() hangs for some reason.
   setTimeout(() => process.exit(0), 3000).unref();
@@ -111,8 +121,12 @@ const wss = new WebSocketServer({ server });
 // scope — this is a LAN party-game server, not a matchmaking service).
 //
 // game.seats: up to MAX_SEATS entries, each either null (empty) or
-//   { ws, name, board, ships, ready, alive }. Seat index is stable for the
-//   life of one game.
+//   { ws, name, board, ships, ready, alive, token, graceTimer }. Seat index
+//   is stable for the life of one game. `token` is a persistent per-seat id
+//   (survives placement -> battle -> rematch) that lets a reconnecting
+//   browser prove which seat is theirs. `graceTimer` is non-null only while
+//   a seat is disconnected-but-still-within-its-reconnect-window (see
+//   GRACE_MS) -- the seat isn't actually torn down until that timer fires.
 // game.roster: seat indices dealt into the current/most-recent game, fixed
 //   once placement begins (used for ready-checks and history/score records
 //   even if a seat's ws later goes null on a battle-phase disconnect).
@@ -140,6 +154,122 @@ function broadcast(msg, exceptIdx = -1) {
   game.seats.forEach((seat, idx) => {
     if (seat && idx !== exceptIdx) send(seat.ws, msg);
   });
+}
+
+function makeToken() {
+  return crypto.randomUUID();
+}
+
+// The only place a seat's grace timer is ever cleared -- keeping every clear
+// site funneled through one helper means it can't drift/leak.
+function clearGrace(seat) {
+  if (seat && seat.graceTimer) {
+    clearTimeout(seat.graceTimer);
+    seat.graceTimer = null;
+  }
+}
+
+function hasAnyLiveConnection() {
+  return game.seats.some((s) => s && s.ws && s.ws.readyState === s.ws.OPEN);
+}
+
+function hasAnyPendingGrace() {
+  return game.seats.some((s) => s && s.graceTimer);
+}
+
+// Safety net: if the room is ever stuck outside the lobby with nobody
+// actually connected and nobody who might still reconnect, just start a
+// fresh lobby instead of staying wedged forever (which used to require a
+// manual restart -- see HANDOFF.md).
+function maybeAutoResetToLobby() {
+  if (game.phase !== 'lobby' && !hasAnyLiveConnection() && !hasAnyPendingGrace()) {
+    game = freshGame();
+  }
+}
+
+function safeParseToken(url) {
+  try {
+    return new URL(url, 'http://internal').searchParams.get('token');
+  } catch {
+    return null;
+  }
+}
+
+// Wires up the message/close/pong handlers a socket needs, whether it's a
+// brand-new connection or one that just reclaimed an existing seat.
+function attachSocketHandlers(ws) {
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+
+  ws.on('message', (raw) => {
+    try {
+      handleMessage(ws, raw);
+    } catch (err) {
+      // Never let one bad message crash the whole server and disconnect everyone.
+      console.error('Error handling message:', err);
+      send(ws, { type: 'sessionExpired' });
+    }
+  });
+
+  ws.on('close', () => {
+    const seat = game.seats[ws.seatIdx];
+    if (!seat || seat.ws !== ws) return; // stale socket, already replaced/cleared
+
+    if (game.phase === 'lobby') {
+      game.seats[ws.seatIdx] = null;
+      broadcastLobby();
+    } else if (game.phase === 'placement' || game.phase === 'battle') {
+      // Don't tear the seat down immediately -- hold it for GRACE_MS in case
+      // this was a brief WiFi blip / refresh / backgrounded tab, and let a
+      // reconnect with the same token slot right back in.
+      seat.ws = null;
+      broadcast({ type: 'opponentConnectionLost', seatIdx: ws.seatIdx, name: seat.name, graceMs: GRACE_MS });
+      const seatIdx = ws.seatIdx;
+      seat.graceTimer = setTimeout(() => onGraceExpired(seatIdx), GRACE_MS);
+    }
+    // phase === 'over': nothing to do here; rematch recomputes who's still
+    // connected by checking each seat's live socket state.
+    maybeAutoResetToLobby();
+  });
+}
+
+// Runs the actual disconnect fallout -- exactly what used to happen
+// immediately on close -- once a seat's reconnect grace window expires with
+// nobody having claimed it back.
+function onGraceExpired(seatIdx) {
+  const seat = game.seats[seatIdx];
+  if (!seat || !seat.graceTimer) return; // already reconnected or otherwise cleared
+  clearGrace(seat);
+
+  if (game.phase === 'placement') {
+    const name = seat.name;
+    game.seats[seatIdx] = null;
+    game.roster = game.roster.filter((i) => i !== seatIdx);
+    broadcast({ type: 'opponentDisconnected', seatIdx, name });
+    if (game.roster.length < MIN_TO_START) {
+      // Not a viable game anymore -- bounce whoever's left back to the
+      // lobby (same Start-game screen, not a hard reload).
+      game.roster.forEach((i) => {
+        const s = game.seats[i];
+        if (s) { s.board = null; s.ships = []; s.ready = false; }
+      });
+      game.phase = 'lobby';
+      game.roster = [];
+      broadcast({ type: 'placementAborted', reason: 'Not enough players left' });
+      broadcastLobby();
+    } else if (game.roster.every((i) => game.seats[i] && game.seats[i].ready)) {
+      // Everyone who's left had already readied up.
+      beginBattle();
+    }
+  } else if (game.phase === 'battle') {
+    // Keep the seat object (name/board) around instead of nulling it, so
+    // history/winner lookups and the eventual gameOver broadcast can still
+    // read their name -- only the dead socket reference goes away.
+    const ended = eliminateSeat(seatIdx, 'disconnected');
+    if (!ended) announceTurn();
+  }
+
+  maybeAutoResetToLobby();
 }
 
 function emptyBoard() {
@@ -196,6 +326,7 @@ function validPlacement(board, row, col, size, horizontal) {
 function beginPlacement(seatIdxs) {
   seatIdxs.forEach((i) => {
     const seat = game.seats[i];
+    clearGrace(seat); // defensive; shouldn't be pending here, cheap insurance
     seat.board = emptyBoard();
     seat.ships = [];
     seat.ready = false;
@@ -271,6 +402,10 @@ function eliminateSeat(seatIdx, reason) {
   const seat = game.seats[seatIdx];
   const name = seat ? seat.name : null;
   if (seat) seat.alive = false;
+  // A seat can be eliminated by being sunk while it's separately mid-grace
+  // from an unrelated disconnect -- clear that timer so it can't later fire
+  // against this (possibly already-reused) seat slot.
+  if (seat) clearGrace(seat);
 
   const pos = game.turnOrder.indexOf(seatIdx);
   if (pos !== -1) {
@@ -310,7 +445,89 @@ function eliminateSeat(seatIdx, reason) {
   return false;
 }
 
-wss.on('connection', (ws) => {
+// Builds the state a reconnecting client needs to rebuild its UI without a
+// reload. Board contents are redacted for every seat except the reconnecting
+// player's own -- server stays authoritative, never leaks unsunk ship
+// positions (matches the same principle the live fireResult broadcasts
+// already follow).
+function buildReconnectedPayload(seatIdx) {
+  const seat = game.seats[seatIdx];
+  const players = game.roster.map((i) => ({ seatIdx: i, name: game.seats[i] && game.seats[i].name }));
+  const base = { type: 'reconnected', seatIdx, token: seat.token, name: seat.name, phase: game.phase, players };
+
+  if (game.phase === 'placement') {
+    const opponentProgress = game.roster
+      .filter((i) => i !== seatIdx)
+      .map((i) => ({ seatIdx: i, placed: game.seats[i].ships.length, total: SHIP_DEFS.length }));
+    return {
+      ...base,
+      shipDefs: SHIP_DEFS,
+      boardSize: BOARD_SIZE,
+      placedShips: seat.ships.map((s) => ({ name: s.name, cells: s.cells })),
+      ready: seat.ready,
+      opponentProgress,
+    };
+  }
+
+  if (game.phase === 'battle') {
+    const boards = {};
+    game.roster.forEach((i) => {
+      const s = game.seats[i];
+      if (!s) return;
+      const cells = s.board.map((row) => row.map((v) => (v === 'hit' || v === 'miss' ? v : null)));
+      const sunkShips = s.ships.filter((sh) => sh.hits >= sh.size).map((sh) => ({ name: sh.name, cells: sh.cells }));
+      boards[i] = { cells, sunkShips };
+    });
+    const activeIdx = activeSeatIdx();
+    const isMyTurn = activeIdx === seatIdx && seat.alive;
+    return {
+      ...base,
+      placedShips: seat.ships.map((s) => ({ name: s.name, cells: s.cells })),
+      boards,
+      eliminatedSeats: game.roster.filter((i) => game.seats[i] && !game.seats[i].alive),
+      myTurnState: {
+        activeSeatIdx: activeIdx,
+        isYourTurn: isMyTurn,
+        targets: game.turnOrder
+          .filter((i) => i !== activeIdx)
+          .map((i) => ({ seatIdx: i, name: game.seats[i].name })),
+      },
+      spectator: !seat.alive,
+    };
+  }
+
+  return base;
+}
+
+wss.on('connection', (ws, req) => {
+  const token = safeParseToken(req.url);
+
+  if (token && (game.phase === 'placement' || game.phase === 'battle')) {
+    // Reconnect is only meaningful during these two phases -- 'lobby' seats
+    // are freed immediately on close (nothing to reclaim), and 'over' is
+    // handled entirely by the existing rematch/readyState logic below, not
+    // by token matching (its stale seat.ws is deliberately left untouched,
+    // see the close handler, so it must never be treated as reclaimable).
+    const idx = game.seats.findIndex((s) => s && s.token === token &&
+      (s.graceTimer || !s.ws || s.ws.readyState !== s.ws.OPEN));
+    if (idx !== -1) {
+      const seat = game.seats[idx];
+      if (seat.ws && seat.ws !== ws) {
+        try { seat.ws.terminate(); } catch { /* already dead */ }
+      }
+      clearGrace(seat); // synchronous, no await before this -- can't race the timer
+      seat.ws = ws;
+      ws.seatIdx = idx;
+      attachSocketHandlers(ws);
+      send(ws, buildReconnectedPayload(idx));
+      broadcast({ type: 'opponentReconnected', seatIdx: idx, name: seat.name }, idx);
+      broadcastScoreboard();
+      return;
+    }
+    // Token present but nothing reclaimable (already expired, game moved on,
+    // or unknown) -- fall through to the normal new-connection flow below.
+  }
+
   if (game.phase !== 'lobby') {
     send(ws, { type: 'gameInProgress' });
     ws.close();
@@ -324,61 +541,26 @@ wss.on('connection', (ws) => {
     return;
   }
 
-  game.seats[idx] = { ws, name: null, board: null, ships: [], ready: false, alive: true };
+  game.seats[idx] = { ws, name: null, board: null, ships: [], ready: false, alive: true, token: makeToken(), graceTimer: null };
   ws.seatIdx = idx;
+  attachSocketHandlers(ws);
 
-  send(ws, { type: 'welcome', seatIdx: idx });
+  send(ws, { type: 'welcome', seatIdx: idx, token: game.seats[idx].token });
   broadcastLobby();
-
-  ws.on('message', (raw) => {
-    try {
-      handleMessage(ws, raw);
-    } catch (err) {
-      // Never let one bad message crash the whole server and disconnect everyone.
-      console.error('Error handling message:', err);
-      send(ws, { type: 'sessionExpired' });
-    }
-  });
-
-  ws.on('close', () => {
-    const seat = game.seats[ws.seatIdx];
-    if (!seat || seat.ws !== ws) return; // stale socket, already replaced/cleared
-
-    if (game.phase === 'lobby') {
-      game.seats[ws.seatIdx] = null;
-      broadcastLobby();
-    } else if (game.phase === 'placement') {
-      const name = seat.name;
-      game.seats[ws.seatIdx] = null;
-      game.roster = game.roster.filter((i) => i !== ws.seatIdx);
-      broadcast({ type: 'opponentDisconnected', seatIdx: ws.seatIdx, name });
-      if (game.roster.length < MIN_TO_START) {
-        // Not a viable game anymore -- bounce whoever's left back to the
-        // lobby (same Start-game screen, not a hard reload).
-        game.roster.forEach((i) => {
-          const s = game.seats[i];
-          if (s) { s.board = null; s.ships = []; s.ready = false; }
-        });
-        game.phase = 'lobby';
-        game.roster = [];
-        broadcast({ type: 'placementAborted', reason: 'Not enough players left' });
-        broadcastLobby();
-      } else if (game.roster.every((i) => game.seats[i] && game.seats[i].ready)) {
-        // Everyone who's left had already readied up.
-        beginBattle();
-      }
-    } else if (game.phase === 'battle') {
-      // Keep the seat object (name/board) around instead of nulling it, so
-      // history/winner lookups and the eventual gameOver broadcast can still
-      // read their name -- only the dead socket reference goes away.
-      const ended = eliminateSeat(ws.seatIdx, 'disconnected');
-      seat.ws = null;
-      if (!ended) announceTurn();
-    }
-    // phase === 'over': nothing to do here; rematch recomputes who's still
-    // connected by checking each seat's live socket state.
-  });
 });
+
+// ---- Heartbeat: catch connections that die without a clean close frame ----
+// (e.g. a Kubernetes NodePort's conntrack silently dropping an idle
+// WebSocket). ws.terminate() fires the same 'close' event a clean disconnect
+// would, so it flows through the normal grace-period logic above with no
+// special-casing.
+const heartbeatInterval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) { ws.terminate(); return; }
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, HEARTBEAT_INTERVAL_MS);
 
 function handleMessage(ws, raw) {
   let msg;
@@ -464,7 +646,12 @@ function handleMessage(ws, raw) {
     }
     seat.ready = true;
     broadcast({ type: 'opponentReady', seatIdx: myIdx }, myIdx);
-    if (game.roster.every((i) => game.seats[i] && game.seats[i].ready)) {
+    // Don't start a battle with a seat that's currently mid-grace (dropped,
+    // might still reconnect) -- if it turns out they never come back,
+    // onGraceExpired's own beginBattle() check picks this up once they're
+    // actually removed.
+    if (game.roster.every((i) => game.seats[i] && game.seats[i].ready) &&
+        !game.roster.some((i) => game.seats[i] && game.seats[i].graceTimer)) {
       beginBattle();
     }
     return;
@@ -518,7 +705,12 @@ function handleMessage(ws, raw) {
     if (game.phase !== 'over') return;
     const survivors = [];
     game.seats.forEach((s, i) => { if (s && s.ws && s.ws.readyState === s.ws.OPEN) survivors.push(i); });
-    game.seats.forEach((s, i) => { if (s && !survivors.includes(i)) game.seats[i] = null; });
+    game.seats.forEach((s, i) => {
+      if (s && !survivors.includes(i)) {
+        clearGrace(s); // a still-pending grace timer here is stale -- this game is over
+        game.seats[i] = null;
+      }
+    });
 
     if (survivors.length < MIN_TO_START) {
       game.phase = 'lobby';

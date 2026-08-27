@@ -140,7 +140,13 @@ connections.
   (next to `server.js`) and restart the server — it'll start a fresh one
   automatically.
 - If someone's browser refreshes, closes, or briefly loses WiFi mid-game,
-  they're simply eliminated (or, in a 2-player game, the remaining player
-  wins) — everyone else's game continues uninterrupted. The player who
-  dropped just needs to reload the page to rejoin the lobby for the next
-  game.
+  they have about 30 seconds to reload the page and get dropped right back
+  into their seat — same board, same ships, same turn. Everyone else just
+  sees a "waiting for them to reconnect..." message in the meantime, and the
+  game isn't paused for anyone whose turn it isn't. If they don't make it
+  back within that window, they're eliminated (or, in a 2-player game, the
+  remaining player wins) and everyone else's game continues uninterrupted.
+- The server also pings each connection in the background, so a dropped
+  WiFi/router connection that never sends a proper "goodbye" (common on
+  flaky home networks) still gets noticed and cleaned up within about half a
+  minute, instead of leaving a phantom seat stuck in the game.
