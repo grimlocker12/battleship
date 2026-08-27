@@ -490,6 +490,7 @@
         <button id="clearBtn" class="secondary">Clear board</button>
         <button id="randomBtn" class="secondary">Random placement</button>
         <button id="readyBtn" disabled>Ready!</button>
+        <button id="stopGameBtnPlacement" class="secondary">🛑 Stop game</button>
       </div>
       <div class="ship-list" id="shipList"></div>
       <div id="opponentProgress"></div>
@@ -512,6 +513,7 @@
       </div>
       <div style="text-align:center; margin-top:18px;">
         <button id="rematchBtn" class="hidden">Play again</button>
+        <button id="stopGameBtnBattle" class="secondary">🛑 Stop game</button>
       </div>
     </div>
 
@@ -718,6 +720,8 @@ const clearBtn = document.getElementById('clearBtn');
 const randomBtn = document.getElementById('randomBtn');
 const rematchBtn = document.getElementById('rematchBtn');
 const winBanner = document.getElementById('winBanner');
+const stopGameBtnPlacement = document.getElementById('stopGameBtnPlacement');
+const stopGameBtnBattle = document.getElementById('stopGameBtnBattle');
 
 // Set right before we already know why a connection is ending (a rejection
 // with its own clear message, or lockGame()'s own message) so the generic
@@ -925,9 +929,9 @@ function renderLobby(msg) {
     lobbySeatsEl.appendChild(div);
   }
   startGameBtn.disabled = !msg.canStart;
-  statusEl.textContent = msg.canStart
+  statusEl.textContent = msg.reason ? msg.reason : (msg.canStart
     ? 'Ready when you are — click Start Game, or wait for more players to join.'
-    : 'Waiting for at least one more player to join and name themselves...';
+    : 'Waiting for at least one more player to join and name themselves...');
 }
 
 startGameBtn.addEventListener('click', () => {
@@ -1141,6 +1145,19 @@ readyBtn.addEventListener('click', () => {
   statusEl.textContent = 'Waiting for everyone else to finish placing ships...';
 });
 
+// ---------- Stop game (bail out of a placement/battle in progress) ----------
+// Any player can end the current game right now instead of everyone sitting
+// through a stuck grace-period wait for someone who isn't coming back (or
+// just because nobody feels like finishing this one). Confirmed first since
+// it ends the game for everyone else too, not just the clicker.
+function requestStopGame() {
+  if (!confirm('Stop the current game for everyone and head back to the lobby?')) return;
+  SFX.click();
+  ws.send(JSON.stringify({ type: 'stopGame' }));
+}
+stopGameBtnPlacement.addEventListener('click', requestStopGame);
+stopGameBtnBattle.addEventListener('click', requestStopGame);
+
 // ---------- Battle phase ----------
 function startBattlePhase(players) {
   placementPhase.classList.add('hidden');
@@ -1150,6 +1167,7 @@ function startBattlePhase(players) {
   eliminatedSeats = {};
   enemyBoardWraps = {};
   enemyGrids = {};
+  stopGameBtnBattle.classList.remove('hidden');
 
   // Clear out any enemy boards left over from a previous game (rematch).
   [...battleBoardsEl.querySelectorAll('.enemy-board-wrap')].forEach((el) => el.remove());
@@ -1280,6 +1298,7 @@ function onGameOver(msg) {
   winBanner.classList.remove('hidden');
   statusEl.textContent = 'Game over.';
   rematchBtn.classList.remove('hidden');
+  stopGameBtnBattle.classList.add('hidden');
   if (won) {
     SFX.win();
     launchConfetti();

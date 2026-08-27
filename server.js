@@ -241,7 +241,15 @@ function onGraceExpired(seatIdx) {
   if (!seat || !seat.graceTimer) return; // already reconnected or otherwise cleared
   clearGrace(seat);
 
-  if (game.phase === 'placement') {
+  if (game.phase === 'lobby') {
+    // The room already bounced back to the lobby before this seat's own
+    // timer got a chance to fire -- e.g. a sibling seat's grace expired a
+    // moment earlier and there weren't enough players left, so it dropped
+    // the whole room out of 'placement' already. Free this seat now instead
+    // of leaving a permanently-occupied phantom nobody can ever reclaim.
+    game.seats[seatIdx] = null;
+    broadcastLobby();
+  } else if (game.phase === 'placement') {
     const name = seat.name;
     game.seats[seatIdx] = null;
     game.roster = game.roster.filter((i) => i !== seatIdx);
@@ -291,13 +299,17 @@ function namedSeatIndices() {
   return result;
 }
 
-function broadcastLobby() {
+// `reason`, when given, is shown once in place of the usual "waiting for
+// players" status text -- used by stopGame so the room knows *why* everyone
+// just landed back in the lobby, instead of it looking like a crash.
+function broadcastLobby(reason) {
   const seatsInfo = game.seats.map((s, i) => (s ? { seatIdx: i, name: s.name } : null));
   broadcast({
     type: 'lobbyUpdate',
     seats: seatsInfo,
     canStart: namedSeatIndices().length >= MIN_TO_START,
     maxSeats: MAX_SEATS,
+    reason: reason || null,
   });
 }
 
@@ -720,6 +732,32 @@ function handleMessage(ws, raw) {
     }
     survivors.forEach((i) => { game.seats[i].ready = false; game.seats[i].alive = true; });
     beginPlacement(survivors);
+    return;
+  }
+
+  if (msg.type === 'stopGame') {
+    // Any player (including a spectator) can bail out of a placement/battle
+    // in progress instead of waiting out a stuck grace timer or an opponent
+    // who just isn't coming back. 'lobby' has nothing active to stop, and
+    // 'over' is already a stable resting state (rematch/leave both work fine
+    // from there), so this only applies to the two "stuck" phases.
+    if (game.phase !== 'placement' && game.phase !== 'battle') return;
+    const stopperName = seat.name;
+    game.seats.forEach((s) => { if (s) clearGrace(s); });
+    // Currently-connected players land back in the lobby with their name
+    // still filled in (nothing lost but the in-progress game); anyone not
+    // actually connected right now (mid-grace or otherwise gone) has no
+    // lobby seat to return to, so their slot is freed instead of leaving a
+    // phantom "filled" seat nobody can claim.
+    game.seats = game.seats.map((s) => {
+      if (!s || !s.ws || s.ws.readyState !== s.ws.OPEN) return null;
+      return { ...s, board: null, ships: [], ready: false, alive: true };
+    });
+    game.roster = [];
+    game.turnOrder = [];
+    game.turnPtr = 0;
+    game.phase = 'lobby';
+    broadcastLobby((stopperName || 'A player') + ' stopped the game. Back to the lobby!');
     return;
   }
 }

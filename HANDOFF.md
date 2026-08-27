@@ -406,6 +406,47 @@ connects to the host machine's LAN IP on port 3000.
     recovered the token from `localStorage`, to isolate the fallback logic
     itself from any quirks of the specific test environment's tab handling.
 
+11. **"Stop game" button.** Andreas asked for a way to kill a
+    placement/battle in progress outright, instead of everyone having to sit
+    through the 60s reconnect grace window when nobody actually wants to
+    keep waiting (a dropped player who isn't coming back, or the group just
+    changing its mind mid-game). Added a `stopGame` message any connected
+    seat can send (including a spectator) while `game.phase` is
+    `'placement'` or `'battle'` -- it clears every pending grace timer, drops
+    any seat that isn't currently connected (nothing to return them to), and
+    resets the rest straight back to the lobby with names intact, no
+    win/loss recorded. `broadcastLobby()` grew an optional `reason` string
+    (`"<name> stopped the game. Back to the lobby!"`) shown once in place of
+    the usual "waiting for players" text, so the room knows why it just
+    landed there instead of it looking like a crash. Client-side: a
+    `🛑 Stop game` button in both the placement controls and the battle
+    controls (hidden again once `gameOver` fires, since `rematchBtn` already
+    covers that state), guarded by a plain `confirm()` since it ends the
+    game for everyone else too, not just the clicker.
+
+    **Found and fixed a real latent race while testing this**, unrelated to
+    `stopGame` itself: if two seats in `'placement'` disconnect close enough
+    together, the first seat's `onGraceExpired` can already bounce the whole
+    room back to `'lobby'` (not enough players left) before the second
+    seat's own grace timer fires. That second `onGraceExpired` only knew how
+    to handle `'placement'`/`'battle'`, so it silently did nothing --
+    leaving that seat as a permanently-occupied phantom (still "filled" in
+    the lobby, `ws: null`, un-reclaimable) until the whole server restarted.
+    Fixed by giving `onGraceExpired` a `'lobby'` branch too: if the room has
+    already moved on by the time this timer fires, just free the seat and
+    `broadcastLobby()` instead of assuming the phase it was scheduled under
+    is still current. `'over'`-phase races don't have this problem --
+    `rematch` already filters survivors by live `ws.readyState`, not by
+    whether a seat object still exists, so a phantom there is harmless and
+    self-heals on the next rematch/lobby-bounce.
+
+    **Testing:** scripted `ws`-client checks (stop mid-placement with a
+    partially-placed opponent, confirming their placement doesn't leak into
+    the next game; stop mid-battle with a third seat mid-grace, confirming
+    it's dropped rather than carried into the lobby as a phantom) plus a
+    dedicated regression script for the double-disconnect race above, then
+    real two-tab browser verification of both buttons end-to-end.
+
 ## Testing approach used so far
 
 There's no permanent test suite in this repo (kept it minimal for a family

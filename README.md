@@ -151,3 +151,8 @@ connections.
   WiFi/router connection that never sends a proper "goodbye" (common on
   flaky home networks) still gets noticed and cleaned up within about half a
   minute, instead of leaving a phantom seat stuck in the game.
+- Don't want to wait out that reconnect window? Any player (including
+  someone already eliminated and just watching) can hit **🛑 Stop game**
+  during placement or battle to end the current game right away for
+  everyone and head back to the lobby — no win/loss is recorded, and
+  everyone's name stays filled in so a new game can start immediately.
